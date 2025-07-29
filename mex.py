@@ -5,4 +5,3 @@ RPC_URL=https://eth.llamarpc.com
 TELEGRAM_BOT_TOKEN=12345678:ABCDEFyourbottoken
 TELEGRAM_CHAT_ID=123456789
 
-+ 
