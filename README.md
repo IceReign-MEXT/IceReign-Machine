@@ -10,7 +10,4 @@ This bot acts as an Automated Market Maker (AMM) Simulator and Token Launchpad. 
 *   **$IBS Presale:** Manages early investor access via ETH/SOL payments.
 *   **Dashboard Sync:** Feeds revenue data directly to the IceGods Command Center.
 
-## 💰 Developer Services
-*   **Rent the Machine:** $1,000/day to point the volume engine at YOUR token.
-
 *Powered by Helius RPC & IceGods Systems*

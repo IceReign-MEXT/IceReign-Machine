@@ -1,11 +1,8 @@
-solana==0.35.0
-solders==0.21.0
-asyncpg
 python-dotenv
-httpx
-flasksolana==0.35.0
-solders==0.21.0
+flask
+requests
+python-telegram-bot>=20.0
 web3
 asyncpg
-python-dotenv
-httpx
+aiohttp
+gunicorn
