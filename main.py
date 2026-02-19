@@ -67,12 +67,12 @@ async def market_maker_loop(app: Application):
                 # Simulate a Massive Buy on Solana to create FOMO
                 tokens = ["$IBS", "$SOL", "$JUP", "$WIF", "$BONK"]
                 platforms = ["Jupiter", "Pump.fun", "Raydium"]
-
+                
                 token = random.choice(tokens)
                 platform = random.choice(platforms)
                 amount_sol = random.uniform(10.5, 100.0)
                 price_impact = random.uniform(1.5, 5.5)
-
+                
                 # The Alert Message
                 msg = (
                     f"🟢 **BUY DETECTED** 🟢\n\n"
@@ -83,12 +83,12 @@ async def market_maker_loop(app: Application):
                     f"🤖 **Bot Action:** BUYING DIP\n"
                     f"🚀 **Target:** MOON"
                 )
-
+                
                 # Post every 3-5 hours to keep channel looking active
                 await app.bot.send_message(chat_id=VIP_CHANNEL_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
                 print(f"✅ Green Candle Posted: {token}")
 
-            await asyncio.sleep(random.randint(10800, 18000))
+            await asyncio.sleep(random.randint(10800, 18000)) 
         except: await asyncio.sleep(300)
 
 # --- 6. TELEGRAM HANDLERS ---
@@ -117,7 +117,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "buy_" in data:
         key = data.replace("buy_", "")
         item = SERVICES[key]
-
+        
         # Log to DB
         try:
             if pool:
@@ -137,7 +137,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args: return await update.message.reply_text("❌ Usage: `/confirm <TX>`")
     tx = context.args[0]
-
+    
     # Helius Check for SOL (Simplified for stability)
     if len(tx) > 70:
         await update.message.reply_text("🟣 **SOL Detected.** Verifying via Helius Node...")
@@ -150,25 +150,25 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("💠 **ETH Detected.** Allocating $IBS Tokens...")
         if pool:
             await pool.execute("INSERT INTO cp_payments (telegram_id, tx_hash, amount_usd, service_type, created_at) VALUES ($1, $2, $3, 'ICE-MACHINE', $4)", str(update.effective_user.id), tx, 100, int(time.time()))
-
+        
         await update.message.reply_text("✅ **ALLOCATION CONFIRMED.**\nWelcome to the $IBS Presale List.")
 
 # --- MAIN ---
 def main():
     threading.Thread(target=run_web, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).build()
-
+    
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try: loop.run_until_complete(init_db())
     except: pass
-
+    
     loop.create_task(market_maker_loop(app))
-
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("confirm", confirm))
     app.add_handler(CallbackQueryHandler(button_handler))
-
+    
     print("🚀 ICE MACHINE LIVE...")
     app.run_polling()
 
