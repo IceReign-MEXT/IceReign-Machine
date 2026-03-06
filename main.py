@@ -144,18 +144,42 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await w.delete()
         except: pass
 
-def main():
-    asyncio.run(init_db())
-    threading.Thread(target=run_flask, daemon=True).start()
+async def main():
+    await init_db()
+    
+    # Start Flask in background
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info(f"🌐 Web server on port {PORT}")
+    
+    # Build application
     app = Application.builder().token(BOT_TOKEN).build()
-    conv = ConversationHandler(entry_points=[CallbackQueryHandler(sub_cb, pattern="^sub_")], states={AWAITING_PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, proc_pay)]}, fallbacks=[])
+    
+    # Add handlers
+    conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(sub_cb, pattern="^sub_")],
+        states={AWAITING_PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, proc_pay)]},
+        fallbacks=[],
+        per_message=False
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv)
     app.add_handler(CommandHandler("activate", activate))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, security))
+    
     logger.info("🚀 BOT STARTED")
-    logger.info(f"💰 Wallet: {SOL_MAIN}")
-    app.run_polling()
+    logger.info(f"💰 Revenue wallet: {SOL_MAIN}")
+    
+    # Start bot with proper signal handling disabled for Render
+    await app.initialize()
+    await app.start()
+    
+    # Start polling without stop signals (Render handles this)
+    await app.updater.start_polling(drop_pending_updates=True)
+    
+    # Keep running
+    stop_event = asyncio.Event()
+    await stop_event.wait()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
