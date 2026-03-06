@@ -1,15 +1,9 @@
 #!/bin/bash
-echo "🚀 Deploying Ice Reign Machine V5..."
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run database migrations (manual step - run schema.sql in Supabase)
-
-# Start with gunicorn for production
-gunicorn -w 4 -b 0.0.0.0:$PORT main:flask_app --daemon
-
-# Or run directly for testing
-python main.py
-
-echo "✅ Deployment complete"
+echo "🚀 Ice Reign Machine Deployment"
+if [[ "$RENDER" == "true" ]]; then
+    echo "📦 Render environment detected"
+    cp requirements-render.txt requirements.txt
+    pip install -r requirements.txt
+    python -c "import asyncio; from main import init_db; asyncio.run(init_db())"
+    echo "✅ Deployment complete"
+fi

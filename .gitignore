@@ -1,12 +1,7 @@
-# SECURITY: Never commit these files
 .env
 .env.local
-.env.production
-*.key
-*.pem
+*.db
+*.sqlite
 __pycache__/
 *.pyc
 .DS_Store
-.vscode/
-.idea/
-*.log
