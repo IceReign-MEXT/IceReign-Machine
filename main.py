@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """
-ICE REIGN MACHINE V6.1 - AIRDROP DISTRIBUTOR
-Termux/Render Compatible (No Solders Dependency)
+ICE REIGN MACHINE V6.2 - RENDER OPTIMIZED
+Runs both Flask (web) and Telegram bot concurrently
 """
-import os, asyncio, logging, threading, aiosqlite, aiohttp
+import os
+import asyncio
+import logging
+import threading
+import aiosqlite
+import aiohttp
 from datetime import datetime, timedelta
 from typing import Optional, Dict
+
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.constants import ParseMode, ChatMemberStatus
@@ -13,6 +19,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from dotenv import load_dotenv
 
 load_dotenv()
+
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -21,26 +28,37 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
 SOL_MAIN = os.getenv("SOL_MAIN")
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
-PORT = int(os.getenv("PORT", 8080))
+PORT = int(os.getenv("PORT", 10000))  # Render default
 SUBSCRIPTION_PRICE = float(os.getenv("SUBSCRIPTION_PRICE", 0.5))
 PRO_PRICE = float(os.getenv("PRO_PRICE", 3.0))
 DB_FILE = "ice_reign.db"
 AWAITING_PAYMENT = 1
 
-# Flask App
+# Create Flask app
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
 def health():
-    return jsonify({"status": "ICE REIGN ONLINE", "version": "6.1.0", "wallet": SOL_MAIN, "time": datetime.utcnow().isoformat()}), 200
+    """Health check endpoint - Render pings this"""
+    return jsonify({
+        "status": "ICE REIGN ONLINE",
+        "version": "6.2.0",
+        "wallet": SOL_MAIN,
+        "time": datetime.utcnow().isoformat()
+    }), 200
 
 @flask_app.route("/webhook/helius", methods=["POST"])
 def helius_webhook():
-    logger.info(f"Webhook: {request.json}")
-    return jsonify({"received": True}), 200
+    """Helius webhook for token detection"""
+    data = request.json
+    logger.info(f"Helius webhook received: {data}")
+    # Process token detection async
+    return jsonify({"received": True, "status": "processing"}), 200
 
 def run_flask():
-    flask_app.run(host='0.0.0.0', port=PORT, threaded=True)
+    """Run Flask in background thread"""
+    logger.info(f"🌐 Starting Flask on port {PORT}")
+    flask_app.run(host='0.0.0.0', port=PORT, threaded=True, debug=False)
 
 # Database
 async def init_db():
@@ -51,9 +69,9 @@ async def init_db():
         await db.execute("CREATE TABLE IF NOT EXISTS user_engagement (group_chat_id TEXT, telegram_id TEXT, message_count INTEGER DEFAULT 0, UNIQUE(group_chat_id, telegram_id))")
         await db.execute("CREATE TABLE IF NOT EXISTS user_wallets (telegram_id TEXT PRIMARY KEY, wallet_address TEXT)")
         await db.commit()
-    logger.info("✅ Database ready")
+    logger.info("✅ Database initialized")
 
-# Solana Utils
+# Solana
 async def verify_sol_payment(tx_sig: str, expected: float) -> bool:
     try:
         async with aiohttp.ClientSession() as s:
@@ -176,21 +194,40 @@ async def track_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try: await msg.delete(); await (await context.bot.send_message(chat_id, "🛡 Spam removed")).delete()
         except: pass
 
-# Main
+# Main - Render Optimized
 def main():
+    # Initialize DB
     asyncio.run(init_db())
-    threading.Thread(target=run_flask, daemon=True).start()
-    logger.info(f"🌐 Web server on port {PORT}")
+    
+    # Start Flask in background thread (for Render health checks)
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Give Flask time to start
+    import time
+    time.sleep(2)
+    
+    logger.info(f"🌐 Flask health check server running on port {PORT}")
+    logger.info("🚀 Starting Telegram bot polling...")
+    
+    # Build and run Telegram bot
     app = Application.builder().token(BOT_TOKEN).build()
-    conv = ConversationHandler(entry_points=[CallbackQueryHandler(sub_callback, pattern="^sub_")], states={AWAITING_PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_payment)]}, fallbacks=[])
+    
+    conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(sub_callback, pattern="^sub_")],
+        states={AWAITING_PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_payment)]},
+        fallbacks=[]
+    )
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("wallet", wallet_cmd))
     app.add_handler(CommandHandler("airdrop", airdrop_cmd))
     app.add_handler(CommandHandler("activate", activate))
     app.add_handler(conv)
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, track_msg))
-    logger.info("🚀 BOT STARTED")
-    app.run_polling()
+    
+    # Run bot (blocking)
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
