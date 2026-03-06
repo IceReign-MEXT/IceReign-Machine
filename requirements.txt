@@ -1,28 +1,23 @@
 # ═══════════════════════════════════════════════════════════
-# ICE REIGN MACHINE - DEPENDENCIES
+# ICE REIGN MACHINE - DEPENDENCIES (CONFLICT-FREE)
 # ═══════════════════════════════════════════════════════════
 
 # Web Framework
 flask==3.0.0
 gunicorn==21.2.0
 
-# Telegram Bot
+# Telegram Bot (Stable version)
 python-telegram-bot==20.7
 
-# Database (Async PostgreSQL)
+# Database
 asyncpg==0.29.0
 
-# HTTP Client
+# HTTP Client (Compatible with python-telegram-bot)
+httpx==0.25.2
 aiohttp==3.9.1
-requests==2.31.0
 
 # Environment
 python-dotenv==1.0.0
-
-# Solana
-solders==0.21.0
-solana==0.30.2
-base58==2.1.1
 
 # Utilities
 python-dateutil==2.8.2

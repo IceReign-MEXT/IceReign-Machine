@@ -14,8 +14,8 @@ Revenue Wallet: 8dtuysk...Hbxy
 Developer Workflow:
 1. Subscribe (pays SOL to your wallet)
 2. Add bot to group (/activate)
-3. Launch token (auto-detected)
-4. Configure airdrop (/campaign) - SETS AMOUNT PER USER
+3. Launch token (auto-detected via Helius)
+4. Configure airdrop (/campaign) - DEVELOPER SETS AMOUNT PER USER
 5. Bot auto-distributes to engaged users
 6. You earn 1% platform fee automatically
 """
@@ -39,7 +39,7 @@ from telegram.ext import (
 
 import asyncpg
 from asyncpg import Pool
-import aiohttp
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -195,43 +195,49 @@ async def init_database():
         return False
 
 # ═══════════════════════════════════════════════════════════
-# SOLANA & HELIUS
+# HELIUS API (All Solana operations via HTTP)
 # ═══════════════════════════════════════════════════════════
 
 async def verify_solana_payment(tx_sig, expected_amount):
+    """Verify payment via Helius API"""
     try:
-        async with aiohttp.ClientSession() as session:
+        async with httpx.AsyncClient() as client:
             url = f"https://api.helius.xyz/v0/transactions/?api-key={Config.HELIUS_API_KEY}"
-            async with session.post(url, json={"transactions": [tx_sig]}, timeout=15) as resp:
-                if resp.status != 200:
-                    return False
-                data = await resp.json()
-                if not data or data[0].get('err'):
-                    return False
-                for t in data[0].get('nativeTransfers', []):
-                    if t.get('toUserAccount') == Config.SOL_MAIN:
-                        amount = float(t['amount']) / 1e9
-                        if amount >= expected_amount * 0.95:
-                            return True
+            resp = await client.post(url, json={"transactions": [tx_sig]}, timeout=15)
+            
+            if resp.status_code != 200:
+                return False
+            
+            data = resp.json()
+            if not data or data[0].get('err'):
+                return False
+            
+            for t in data[0].get('nativeTransfers', []):
+                if t.get('toUserAccount') == Config.SOL_MAIN:
+                    amount = float(t['amount']) / 1e9
+                    if amount >= expected_amount * 0.95:
+                        return True
         return False
     except Exception as e:
         logger.error(f"Verify error: {e}")
         return False
 
 async def get_token_metadata(mint_address):
+    """Get token metadata from Helius"""
     try:
-        async with aiohttp.ClientSession() as session:
+        async with httpx.AsyncClient() as client:
             url = f"https://api.helius.xyz/v0/tokens/?api-key={Config.HELIUS_API_KEY}"
-            async with session.get(url, params={"mintAddresses": [mint_address]}) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data[0] if data else {}
+            resp = await client.get(url, params={"mintAddresses": [mint_address]})
+            if resp.status_code == 200:
+                data = resp.json()
+                return data[0] if data else {}
         return {}
     except Exception as e:
         logger.error(f"Metadata error: {e}")
         return {}
 
 async def process_token_detection(data):
+    """Auto-detect token and post to channel"""
     global bot_instance
     try:
         token_mint = data.get('tokenAddress') or data.get('mint')
@@ -258,6 +264,7 @@ async def process_token_detection(data):
                 VALUES ($1, $2, $3, $4, $5)
             """, dev['telegram_id'], token_mint, symbol, name, str(meta.get('supply', 'Unknown')))
         
+        # Post to VIP channel
         if bot_instance and Config.VIP_CHANNEL_ID:
             try:
                 await bot_instance.send_photo(
@@ -277,6 +284,7 @@ async def process_token_detection(data):
             except Exception as e:
                 logger.error(f"Channel post failed: {e}")
         
+        # Notify dev
         try:
             await bot_instance.send_message(
                 dev['telegram_id'],
@@ -423,13 +431,13 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Get wallet from TX
         dev_wallet = None
         try:
-            async with aiohttp.ClientSession() as s:
+            async with httpx.AsyncClient() as client:
                 url = f"https://api.helius.xyz/v0/transactions/?api-key={Config.HELIUS_API_KEY}"
-                async with s.post(url, json={"transactions": [tx]}) as r:
-                    if r.status == 200:
-                        data = await r.json()
-                        if data and data[0].get('nativeTransfers'):
-                            dev_wallet = data[0]['nativeTransfers'][0].get('fromUserAccount')
+                resp = await client.post(url, json={"transactions": [tx]})
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data and data[0].get('nativeTransfers'):
+                        dev_wallet = data[0]['nativeTransfers'][0].get('fromUserAccount')
         except:
             pass
         
