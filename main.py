@@ -263,15 +263,16 @@ async def security_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 # --- MAIN ---
-async def main():
-    await init_db()
+def main():
+    # Initialize database first
+    asyncio.run(init_db())
     
-    # Start web server
+    # Start web server in background thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info(f"🌐 Web server on port {PORT}")
     
-    # Build application
+    # Build and run bot
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Conversation handler
@@ -287,16 +288,11 @@ async def main():
     application.add_handler(CommandHandler("activate", activate_group))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, security_handler))
     
-    logger.info("🚀 BOT STARTED")
+    logger.info("🚀 BOT STARTED - POLLING ACTIVE")
     logger.info(f"💰 Revenue wallet: {SOL_MAIN}")
     
-    # Start polling
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    
-    # Keep running
-    await asyncio.Event().wait()
+    # Run the bot (blocking)
+    application.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
