@@ -3,31 +3,19 @@
 ╔══════════════════════════════════════════════════════════════════╗
 ║                    ICE REIGN MACHINE V6                          ║
 ║              THE AUTONOMOUS AIRDROP EMPIRE                      ║
-╠══════════════════════════════════════════════════════════════════╣
-║  Auto-Detect → Auto-Configure → Auto-Distribute → Auto-Profit   ║
 ╚══════════════════════════════════════════════════════════════════╝
 
 Owner: Mex Robert (@MexRobertICE)
 Channel: @ICEGODSICEDEVIL
 Revenue Wallet: 8dtuysk...Hbxy
-
-Developer Workflow:
-1. Subscribe (pays SOL to your wallet)
-2. Add bot to group (/activate)
-3. Launch token (auto-detected via Helius)
-4. Configure airdrop (/campaign) - DEVELOPER SETS AMOUNT PER USER
-5. Bot auto-distributes to engaged users
-6. You earn 1% platform fee automatically
 """
 
 import os
 import asyncio
 import logging
 import threading
-import re
+import aiosqlite
 from datetime import datetime, timedelta
-from decimal import Decimal
-from typing import Optional, Dict, List
 
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
@@ -37,8 +25,6 @@ from telegram.ext import (
     filters, CallbackQueryHandler, ConversationHandler
 )
 
-import asyncpg
-from asyncpg import Pool
 import httpx
 from dotenv import load_dotenv
 
@@ -60,23 +46,20 @@ class Config:
     VIP_CHANNEL_ID = os.getenv("VIP_CHANNEL_ID")
     SOL_MAIN = os.getenv("SOL_MAIN")
     HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
-    SOLANA_RPC = os.getenv("SOLANA_RPC")
-    DATABASE_URL = os.getenv("DATABASE_URL")
     PORT = int(os.getenv("PORT", 10000))
     PRICE_BASIC = float(os.getenv("PRICE_BASIC", 0.5))
     PRICE_PRO = float(os.getenv("PRICE_PRO", 3.0))
     PRICE_ENTERPRISE = float(os.getenv("PRICE_ENTERPRISE", 10.0))
     PLATFORM_FEE = float(os.getenv("PLATFORM_FEE_PERCENT", 1.0))
 
-pool: Optional[Pool] = None
-bot_instance: Optional[Bot] = None
-
-# Conversation states
+DB_FILE = "ice_reign.db"
 AWAITING_PAYMENT = 1
 CONFIGURING_AIRDROP = 2
 
+bot_instance = None
+
 # ═══════════════════════════════════════════════════════════
-# FLASK WEB SERVER
+# FLASK SERVER
 # ═══════════════════════════════════════════════════════════
 
 flask_app = Flask(__name__)
@@ -85,16 +68,10 @@ flask_app = Flask(__name__)
 def health():
     return jsonify({
         "status": "🟢 OPERATIONAL",
-        "system": "ICE REIGN MACHINE V6",
+        "system": "ICE REIGN V6",
         "owner": "Mex Robert",
         "channel": "@ICEGODSICEDEVIL",
-        "features": [
-            "Auto-Token-Detection",
-            "VIP-Channel-Alerts",
-            "Developer-Airdrop-Config",
-            "Auto-Distribution",
-            "Revenue-Tracking"
-        ]
+        "wallet": Config.SOL_MAIN[:15] + "..."
     }), 200
 
 @flask_app.route("/helius/webhook", methods=['POST'])
@@ -111,107 +88,94 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=Config.PORT, threaded=True, debug=False)
 
 # ═══════════════════════════════════════════════════════════
-# DATABASE
+# SQLITE DATABASE (Zero compilation)
 # ═══════════════════════════════════════════════════════════
 
-async def init_database():
-    global pool
-    try:
-        pool = await asyncpg.create_pool(Config.DATABASE_URL, min_size=5, max_size=20)
-        async with pool.acquire() as conn:
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS developers (
-                    telegram_id TEXT PRIMARY KEY,
-                    username TEXT,
-                    plan TEXT DEFAULT 'none',
-                    status TEXT DEFAULT 'inactive',
-                    sol_wallet TEXT,
-                    subscription_end TIMESTAMP,
-                    total_paid DECIMAL(20,9) DEFAULT 0,
-                    groups_allowed INTEGER DEFAULT 1,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS revenue_log (
-                    id SERIAL PRIMARY KEY,
-                    dev_id TEXT,
-                    amount_sol DECIMAL(20,9),
-                    revenue_type TEXT,
-                    tx_signature TEXT,
-                    description TEXT,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS protected_groups (
-                    id SERIAL PRIMARY KEY,
-                    dev_id TEXT,
-                    telegram_chat_id TEXT UNIQUE,
-                    group_name TEXT,
-                    is_active BOOLEAN DEFAULT TRUE,
-                    messages_tracked INTEGER DEFAULT 0,
-                    spam_blocked INTEGER DEFAULT 0
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS token_campaigns (
-                    id SERIAL PRIMARY KEY,
-                    dev_id TEXT,
-                    token_mint TEXT,
-                    token_symbol TEXT,
-                    token_name TEXT,
-                    total_supply TEXT,
-                    airdrop_amount DECIMAL(20,9),
-                    per_user_amount DECIMAL(20,9),
-                    min_engagement INTEGER DEFAULT 10,
-                    max_users INTEGER DEFAULT 1000,
-                    platform_fee DECIMAL(20,9) DEFAULT 0,
-                    status TEXT DEFAULT 'detected',
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    configured_at TIMESTAMP,
-                    completed_at TIMESTAMP
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_engagement (
-                    id SERIAL PRIMARY KEY,
-                    group_id INTEGER,
-                    telegram_id TEXT,
-                    username TEXT,
-                    message_count INTEGER DEFAULT 0,
-                    reaction_count INTEGER DEFAULT 0,
-                    wallet_address TEXT,
-                    airdrop_received BOOLEAN DEFAULT FALSE,
-                    airdrop_amount DECIMAL(20,9) DEFAULT 0,
-                    last_active TIMESTAMP DEFAULT NOW(),
-                    UNIQUE(group_id, telegram_id)
-                )
-            """)
-        logger.info("✅ Database ready")
-        return True
-    except Exception as e:
-        logger.error(f"DB error: {e}")
-        return False
+async def init_db():
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS developers (
+                telegram_id TEXT PRIMARY KEY,
+                username TEXT,
+                plan TEXT DEFAULT 'none',
+                status TEXT DEFAULT 'inactive',
+                sol_wallet TEXT,
+                subscription_end TIMESTAMP,
+                total_paid REAL DEFAULT 0,
+                groups_allowed INTEGER DEFAULT 1
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS revenue_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dev_id TEXT,
+                amount_sol REAL,
+                revenue_type TEXT,
+                description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS protected_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dev_id TEXT,
+                telegram_chat_id TEXT UNIQUE,
+                group_name TEXT,
+                is_active INTEGER DEFAULT 1,
+                messages_tracked INTEGER DEFAULT 0,
+                spam_blocked INTEGER DEFAULT 0
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS token_campaigns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dev_id TEXT,
+                token_mint TEXT,
+                token_symbol TEXT,
+                token_name TEXT,
+                total_supply TEXT,
+                airdrop_amount REAL,
+                per_user_amount REAL,
+                min_engagement INTEGER DEFAULT 10,
+                max_users INTEGER DEFAULT 1000,
+                platform_fee REAL DEFAULT 0,
+                status TEXT DEFAULT 'detected',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                configured_at TIMESTAMP,
+                completed_at TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_engagement (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER,
+                telegram_id TEXT,
+                username TEXT,
+                message_count INTEGER DEFAULT 0,
+                reaction_count INTEGER DEFAULT 0,
+                airdrop_received INTEGER DEFAULT 0,
+                airdrop_amount REAL DEFAULT 0,
+                last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(group_id, telegram_id)
+            )
+        """)
+        await db.commit()
+    logger.info("✅ SQLite Database ready")
 
 # ═══════════════════════════════════════════════════════════
-# HELIUS API (All Solana operations via HTTP)
+# HELIUS API
 # ═══════════════════════════════════════════════════════════
 
-async def verify_solana_payment(tx_sig, expected_amount):
-    """Verify payment via Helius API"""
+async def verify_payment(tx_sig, expected_amount):
     try:
         async with httpx.AsyncClient() as client:
             url = f"https://api.helius.xyz/v0/transactions/?api-key={Config.HELIUS_API_KEY}"
             resp = await client.post(url, json={"transactions": [tx_sig]}, timeout=15)
-            
             if resp.status_code != 200:
                 return False
-            
             data = resp.json()
             if not data or data[0].get('err'):
                 return False
-            
             for t in data[0].get('nativeTransfers', []):
                 if t.get('toUserAccount') == Config.SOL_MAIN:
                     amount = float(t['amount']) / 1e9
@@ -223,7 +187,6 @@ async def verify_solana_payment(tx_sig, expected_amount):
         return False
 
 async def get_token_metadata(mint_address):
-    """Get token metadata from Helius"""
     try:
         async with httpx.AsyncClient() as client:
             url = f"https://api.helius.xyz/v0/tokens/?api-key={Config.HELIUS_API_KEY}"
@@ -237,7 +200,6 @@ async def get_token_metadata(mint_address):
         return {}
 
 async def process_token_detection(data):
-    """Auto-detect token and post to channel"""
     global bot_instance
     try:
         token_mint = data.get('tokenAddress') or data.get('mint')
@@ -246,11 +208,9 @@ async def process_token_detection(data):
         if not token_mint or not deployer:
             return
         
-        async with pool.acquire() as conn:
-            dev = await conn.fetchrow("""
-                SELECT * FROM developers 
-                WHERE sol_wallet = $1 AND status = 'active'
-            """, deployer)
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute("SELECT * FROM developers WHERE sol_wallet = ? AND status = 'active'", (deployer,)) as c:
+                dev = await c.fetchone()
             
             if not dev:
                 return
@@ -259,12 +219,13 @@ async def process_token_detection(data):
             symbol = meta.get('symbol', 'NEW')
             name = meta.get('name', 'Unknown')
             
-            await conn.execute("""
+            await db.execute("""
                 INSERT INTO token_campaigns (dev_id, token_mint, token_symbol, token_name, total_supply)
-                VALUES ($1, $2, $3, $4, $5)
-            """, dev['telegram_id'], token_mint, symbol, name, str(meta.get('supply', 'Unknown')))
+                VALUES (?, ?, ?, ?, ?)
+            """, (dev['telegram_id'], token_mint, symbol, name, str(meta.get('supply', 'Unknown'))))
+            await db.commit()
         
-        # Post to VIP channel
+        # Post to channel
         if bot_instance and Config.VIP_CHANNEL_ID:
             try:
                 await bot_instance.send_photo(
@@ -275,8 +236,6 @@ async def process_token_detection(data):
                         f"🔖 Mint: `{token_mint}`\n"
                         f"👨‍💻 Dev: @{dev['username'] or 'Unknown'}\n"
                         f"🤖 Auto-detected by Ice Reign\n\n"
-                        f"📊 Supply: {meta.get('supply', 'Unknown')}\n"
-                        f"🛡 Status: Verified\n\n"
                         f"👇 Join group for airdrop details"
                     ),
                     parse_mode=ParseMode.MARKDOWN
@@ -302,7 +261,7 @@ async def process_token_detection(data):
         logger.error(f"Detection error: {e}")
 
 # ═══════════════════════════════════════════════════════════
-# TELEGRAM HANDLERS
+# HANDLERS
 # ═══════════════════════════════════════════════════════════
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -312,18 +271,21 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if str(user.id) == Config.ADMIN_ID:
-        async with pool.acquire() as conn:
-            rev = await conn.fetchrow("SELECT SUM(amount_sol) FROM revenue_log")
-            total = rev['sum'] or 0
-            devs = await conn.fetchval("SELECT COUNT(*) FROM developers WHERE status='active'")
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute("SELECT SUM(amount_sol) FROM revenue_log") as c:
+                row = await c.fetchone()
+                total = row[0] or 0
+            async with db.execute("SELECT COUNT(*) FROM developers WHERE status='active'") as c:
+                devs = (await c.fetchone())[0]
         await update.message.reply_text(
             f"👑 **ADMIN**\nRevenue: {total:.4f} SOL\nDevs: {devs}\nWallet: `{Config.SOL_MAIN}`",
             parse_mode=ParseMode.MARKDOWN
         )
         return
     
-    async with pool.acquire() as conn:
-        dev = await conn.fetchrow("SELECT * FROM developers WHERE telegram_id=$1", str(user.id))
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT * FROM developers WHERE telegram_id=?", (str(user.id),)) as c:
+            dev = await c.fetchone()
     
     if dev and dev['status'] == 'active':
         await show_dev_panel(update, dev)
@@ -346,15 +308,11 @@ async def show_sales(update: Update):
             f"✅ Launch token → Bot detects instantly\n"
             f"✅ Auto-posts to @ICEGODSICEDEVIL\n"
             f"✅ **YOU set airdrop amount per user**\n"
-            f"✅ Bot distributes automatically\n"
-            f"✅ 24/7 anti-spam protection\n\n"
+            f"✅ Bot distributes automatically\n\n"
             f"**Pricing:**\n"
-            f"• Basic: {Config.PRICE_BASIC} SOL (1 group)\n"
-            f"• Pro: {Config.PRICE_PRO} SOL (3 groups)\n"
-            f"• Enterprise: {Config.PRICE_ENTERPRISE} SOL (unlimited)\n\n"
-            f"**Revenue Share:**\n"
-            f"You pay: Monthly subscription\n"
-            f"We take: {Config.PLATFORM_FEE}% of airdrops only\n\n"
+            f"• Basic: {Config.PRICE_BASIC} SOL\n"
+            f"• Pro: {Config.PRICE_PRO} SOL\n"
+            f"• Enterprise: {Config.PRICE_ENTERPRISE} SOL\n\n"
             f"💰 Pay to: `{Config.SOL_MAIN}`\n\n"
             f"👑 Owner: @MexRobertICE"
         ),
@@ -363,9 +321,11 @@ async def show_sales(update: Update):
     )
 
 async def show_dev_panel(update: Update, dev):
-    async with pool.acquire() as conn:
-        groups = await conn.fetch("SELECT * FROM protected_groups WHERE dev_id=$1", dev['telegram_id'])
-        camps = await conn.fetch("SELECT * FROM token_campaigns WHERE dev_id=$1 ORDER BY created_at DESC LIMIT 3", dev['telegram_id'])
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT * FROM protected_groups WHERE dev_id=?", (dev['telegram_id'],)) as c:
+            groups = await c.fetchall()
+        async with db.execute("SELECT * FROM token_campaigns WHERE dev_id=? ORDER BY created_at DESC LIMIT 3", (dev['telegram_id'],)) as c:
+            camps = await c.fetchall()
     
     kb = [[InlineKeyboardButton("➕ Add Group", callback_data="add_group")],
           [InlineKeyboardButton("🎯 Configure Airdrop", callback_data="goto_campaign")]]
@@ -380,18 +340,14 @@ async def show_dev_panel(update: Update, dev):
         f"**Groups:** {len(groups)}/{dev['groups_allowed']}\n\n"
         f"**Recent Tokens:**\n{camps_text}\n\n"
         f"**How to use:**\n"
-        f"1. Add bot to your group: /activate\n"
-        f"2. Launch your token (auto-detected)\n"
+        f"1. Add bot to group: /activate\n"
+        f"2. Launch token (auto-detected)\n"
         f"3. **Set airdrop amounts:** /campaign\n"
-        f"4. Bot auto-distributes to engaged users\n\n"
+        f"4. Bot auto-distributes\n\n"
         f"_Your launches auto-post to @ICEGODSICEDEVIL_",
         reply_markup=InlineKeyboardMarkup(kb),
         parse_mode=ParseMode.MARKDOWN
     )
-
-# ═══════════════════════════════════════════════════════════
-# SUBSCRIPTION FLOW
-# ═══════════════════════════════════════════════════════════
 
 async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -425,7 +381,7 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("⏳ Verifying...")
     
-    if await verify_solana_payment(tx, plan['price']):
+    if await verify_payment(tx, plan['price']):
         expiry = datetime.now() + timedelta(days=30)
         
         # Get wallet from TX
@@ -441,18 +397,15 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
         
-        async with pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO developers (telegram_id, username, plan, status, sol_wallet, subscription_end, total_paid, groups_allowed)
-                VALUES ($1, $2, $3, 'active', $4, $5, $6, $7)
-                ON CONFLICT (telegram_id) DO UPDATE SET
-                    plan = EXCLUDED.plan, status = 'active', sol_wallet = COALESCE(EXCLUDED.sol_wallet, developers.sol_wallet),
-                    subscription_end = EXCLUDED.subscription_end, total_paid = developers.total_paid + EXCLUDED.total_paid,
-                    groups_allowed = EXCLUDED.groups_allowed
-            """, str(user.id), user.username, plan['name'], dev_wallet, expiry, plan['price'], plan['groups'])
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute("""
+                INSERT OR REPLACE INTO developers (telegram_id, username, plan, status, sol_wallet, subscription_end, total_paid, groups_allowed)
+                VALUES (?, ?, ?, 'active', ?, ?, COALESCE((SELECT total_paid FROM developers WHERE telegram_id=?), 0) + ?, ?)
+            """, (str(user.id), user.username, plan['name'], dev_wallet, expiry, str(user.id), plan['price'], plan['groups']))
             
-            await conn.execute("INSERT INTO revenue_log (dev_id, amount_sol, revenue_type, tx_signature, description) VALUES ($1, $2, 'subscription', $3, $4)",
-                           str(user.id), plan['price'], tx, f"{plan['name']} subscription")
+            await db.execute("INSERT INTO revenue_log (dev_id, amount_sol, revenue_type, description) VALUES (?, ?, 'subscription', ?)",
+                           (str(user.id), plan['price'], f"{plan['name']} subscription"))
+            await db.commit()
         
         await update.message.reply_text(
             f"✅ **ACTIVATED!**\n\n"
@@ -476,27 +429,28 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ═══════════════════════════════════════════════════════════
-# AIRDROP CONFIGURATION (Developer sets amounts)
+# AIRDROP CONFIGURATION
 # ═══════════════════════════════════════════════════════════
 
 async def cmd_campaign(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Developer configures airdrop amounts"""
     user = update.effective_user
     
     if update.effective_chat.type != "private":
         return
     
-    async with pool.acquire() as conn:
-        dev = await conn.fetchrow("SELECT * FROM developers WHERE telegram_id=$1 AND status='active'", str(user.id))
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT * FROM developers WHERE telegram_id=? AND status='active'", (str(user.id),)) as c:
+            dev = await c.fetchone()
         if not dev:
             await update.message.reply_text("❌ Subscribe first. Use /start")
             return
         
-        camps = await conn.fetch("""
+        async with db.execute("""
             SELECT * FROM token_campaigns 
-            WHERE dev_id = $1 AND status IN ('detected', 'configured')
+            WHERE dev_id = ? AND status IN ('detected', 'configured')
             ORDER BY created_at DESC
-        """, str(user.id))
+        """, (str(user.id),)) as c:
+            camps = await c.fetchall()
     
     if not camps:
         await update.message.reply_text(
@@ -544,10 +498,8 @@ async def config_campaign_callback(update: Update, context: ContextTypes.DEFAULT
         "**What this means:**\n"
         "• **TOTAL:** Total tokens to distribute\n"
         "• **PER_USER:** Each eligible user gets this amount\n"
-        "• **MIN_MSG:** Minimum messages to qualify (stops bots)\n"
-        "• **MAX_USERS:** Top N engaged users (ranked by activity)\n\n"
-        "Example sends 1M tokens, 100 per person, "
-        "to top 1000 users with 10+ messages.\n\n"
+        "• **MIN_MSG:** Minimum messages to qualify\n"
+        "• **MAX_USERS:** Top N engaged users\n\n"
         "Platform fee: " + str(Config.PLATFORM_FEE) + "% (auto-deducted)\n\n"
         "Paste your config:",
         parse_mode=ParseMode.MARKDOWN
@@ -555,7 +507,6 @@ async def config_campaign_callback(update: Update, context: ContextTypes.DEFAULT
     return CONFIGURING_AIRDROP
 
 async def process_airdrop_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Save developer's airdrop configuration"""
     user = update.effective_user
     camp_id = context.user_data.get('configuring_campaign')
     
@@ -566,7 +517,6 @@ async def process_airdrop_config(update: Update, context: ContextTypes.DEFAULT_T
     text = update.message.text.strip()
     config = {}
     
-    # Parse configuration
     for line in text.split('\n'):
         if ':' in line:
             key, val = line.split(':', 1)
@@ -580,10 +530,8 @@ async def process_airdrop_config(update: Update, context: ContextTypes.DEFAULT_T
         
         if total <= 0 or per_user <= 0:
             raise ValueError("Amounts must be positive")
-        
         if per_user > total:
             raise ValueError("Per user cannot exceed total")
-        
     except Exception as e:
         await update.message.reply_text(
             f"❌ **Error:** {str(e)}\n\n"
@@ -598,24 +546,23 @@ async def process_airdrop_config(update: Update, context: ContextTypes.DEFAULT_T
         )
         return CONFIGURING_AIRDROP
     
-    # Calculate
     platform_fee = total * (Config.PLATFORM_FEE / 100)
     dev_amount = total - platform_fee
     estimated_users = min(int(dev_amount / per_user), max_users)
     
-    # Save
-    async with pool.acquire() as conn:
-        await conn.execute("""
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("""
             UPDATE token_campaigns 
-            SET airdrop_amount = $1,
-                per_user_amount = $2,
-                min_engagement = $3,
-                max_users = $4,
-                platform_fee = $5,
+            SET airdrop_amount = ?,
+                per_user_amount = ?,
+                min_engagement = ?,
+                max_users = ?,
+                platform_fee = ?,
                 status = 'configured',
-                configured_at = NOW()
-            WHERE id = $6 AND dev_id = $7
-        """, total, per_user, min_msg, max_users, platform_fee, camp_id, str(user.id))
+                configured_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND dev_id = ?
+        """, (total, per_user, min_msg, max_users, platform_fee, camp_id, str(user.id)))
+        await db.commit()
     
     kb = [
         [InlineKeyboardButton("✅ CONFIRM & START", callback_data=f"start_dist_{camp_id}")],
@@ -638,10 +585,9 @@ async def process_airdrop_config(update: Update, context: ContextTypes.DEFAULT_T
         f"• Fee goes to: `{Config.SOL_MAIN[:25]}...`\n\n"
         f"**Next:**\n"
         f"1. Confirm below\n"
-        f"2. Send tokens to bot's wallet\n"
-        f"3. Bot auto-distributes to top engaged users\n"
-        f"4. Fee auto-transfers to owner\n\n"
-        f"_Users ranked by: messages + reactions + time in group_",
+        f"2. Send tokens to bot\n"
+        f"3. Bot auto-distributes\n"
+        f"4. Fee auto-transfers to owner",
         reply_markup=InlineKeyboardMarkup(kb),
         parse_mode=ParseMode.MARKDOWN
     )
@@ -649,75 +595,69 @@ async def process_airdrop_config(update: Update, context: ContextTypes.DEFAULT_T
     return ConversationHandler.END
 
 async def start_distribution_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Begin automatic distribution"""
     query = update.callback_query
     await query.answer()
     
     camp_id = int(query.data.replace("start_dist_", ""))
     
-    async with pool.acquire() as conn:
-        camp = await conn.fetchrow("SELECT * FROM token_campaigns WHERE id = $1", camp_id)
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT * FROM token_campaigns WHERE id = ?", (camp_id,)) as c:
+            camp = await c.fetchone()
     
     if not camp:
         await query.edit_message_text("❌ Campaign not found")
         return
     
-    # Get eligible users
     users = await get_eligible_users(camp)
     
     await query.edit_message_text(
         f"🚀 **DISTRIBUTION STARTED**\n\n"
         f"Token: {camp['token_symbol']}\n"
         f"Recipients: {len(users)} users\n"
-        f"Per User: {camp['per_user_amount']:,.0f} tokens\n"
-        f"Total: {camp['airdrop_amount']:,.0f} tokens\n\n"
-        f"⏳ Sending... (est. {len(users)} seconds)\n\n"
-        f"_Users selected by engagement score_",
+        f"Per User: {camp['per_user_amount']:,.0f} tokens\n\n"
+        f"⏳ Sending...",
         parse_mode=ParseMode.MARKDOWN
     )
     
-    # Start distribution
     asyncio.create_task(distribute_tokens_task(camp, users))
 
 async def get_eligible_users(campaign):
-    """Get users sorted by engagement"""
-    async with pool.acquire() as conn:
-        users = await conn.fetch("""
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("""
             SELECT ue.telegram_id, ue.username, ue.message_count, ue.reaction_count,
                    (ue.message_count * 1 + ue.reaction_count * 2) as score
             FROM user_engagement ue
             JOIN protected_groups pg ON pg.id = ue.group_id
-            WHERE pg.dev_id = $1
-            AND ue.message_count >= $2
-            AND ue.airdrop_received = FALSE
+            WHERE pg.dev_id = ?
+            AND ue.message_count >= ?
+            AND ue.airdrop_received = 0
             ORDER BY score DESC
-            LIMIT $3
-        """, campaign['dev_id'], campaign.get('min_engagement', 10), campaign.get('max_users', 1000))
+            LIMIT ?
+        """, (campaign['dev_id'], campaign['min_engagement'], campaign['max_users'])) as c:
+            users = await c.fetchall()
     return users
 
 async def distribute_tokens_task(campaign, users):
-    """Auto-send tokens to all users"""
     success = 0
     fail = 0
     
     for user in users:
         try:
-            # Mark as received
-            async with pool.acquire() as conn:
-                await conn.execute("""
+            async with aiosqlite.connect(DB_FILE) as db:
+                await db.execute("""
                     UPDATE user_engagement 
-                    SET airdrop_received = TRUE, airdrop_amount = $1
-                    WHERE telegram_id = $2
-                """, campaign['per_user_amount'], user['telegram_id'])
+                    SET airdrop_received = 1, airdrop_amount = ?
+                    WHERE telegram_id = ?
+                """, (campaign['per_user_amount'], user['telegram_id']))
+                await db.commit()
             
-            # Notify user
             try:
                 await bot_instance.send_message(
                     user['telegram_id'],
                     f"🎉 **Airdrop Received!**\n\n"
                     f"Token: {campaign['token_symbol']}\n"
                     f"Amount: {campaign['per_user_amount']:,.0f}\n"
-                    f"Your Score: {user['score']} (messages + reactions)\n\n"
+                    f"Your Score: {user['score']}\n\n"
                     f"Thank you for being active!",
                     parse_mode=ParseMode.MARKDOWN
                 )
@@ -725,28 +665,23 @@ async def distribute_tokens_task(campaign, users):
                 pass
             
             success += 1
-            await asyncio.sleep(1)  # Rate limit
-            
+            await asyncio.sleep(1)
         except Exception as e:
-            logger.error(f"Failed to send to {user['telegram_id']}: {e}")
+            logger.error(f"Failed: {e}")
             fail += 1
     
-    # Complete
-    async with pool.acquire() as conn:
-        await conn.execute("""
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("""
             UPDATE token_campaigns 
-            SET status = 'completed', completed_at = NOW()
-            WHERE id = $1
-        """, campaign['id'])
-        
-        # Log revenue
-        await conn.execute("""
+            SET status = 'completed', completed_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (campaign['id'],))
+        await db.execute("""
             INSERT INTO revenue_log (dev_id, amount_sol, revenue_type, description)
-            VALUES ($1, $2, 'platform_fee', $3)
-        """, campaign['dev_id'], campaign['platform_fee'], 
-            f"Airdrop fee for {campaign['token_symbol']}")
+            VALUES (?, ?, 'platform_fee', ?)
+        """, (campaign['dev_id'], campaign['platform_fee'], f"Airdrop fee for {campaign['token_symbol']}"))
+        await db.commit()
     
-    # Notify dev
     try:
         await bot_instance.send_message(
             campaign['dev_id'],
@@ -754,17 +689,14 @@ async def distribute_tokens_task(campaign, users):
             f"Token: {campaign['token_symbol']}\n"
             f"Successful: {success}\n"
             f"Failed: {fail}\n"
-            f"Platform Fee: {campaign['platform_fee']:,.0f} tokens\n\n"
-            f"Your community is rewarded!",
+            f"Platform Fee: {campaign['platform_fee']:,.0f} tokens",
             parse_mode=ParseMode.MARKDOWN
         )
     except:
         pass
-    
-    logger.info(f"Distribution complete: {success}/{len(users)}")
 
 # ═══════════════════════════════════════════════════════════
-# GROUP ACTIVATION & SECURITY
+# GROUP & SECURITY
 # ═══════════════════════════════════════════════════════════
 
 async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -780,25 +712,26 @@ async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Admin only")
         return
     
-    async with pool.acquire() as conn:
-        dev = await conn.fetchrow("SELECT * FROM developers WHERE telegram_id=$1 AND status='active'", str(user.id))
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT * FROM developers WHERE telegram_id=? AND status='active'", (str(user.id),)) as c:
+            dev = await c.fetchone()
         if not dev:
             await update.message.reply_text("❌ Subscribe first")
             return
         
-        await conn.execute("""
-            INSERT INTO protected_groups (dev_id, telegram_chat_id, group_name)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (telegram_chat_id) DO UPDATE SET is_active = TRUE, dev_id = EXCLUDED.dev_id
-        """, str(user.id), str(chat.id), chat.title)
+        await db.execute("""
+            INSERT OR REPLACE INTO protected_groups (dev_id, telegram_chat_id, group_name)
+            VALUES (?, ?, ?)
+        """, (str(user.id), str(chat.id), chat.title))
+        await db.commit()
     
     await update.message.reply_text(
         "✅ **GROUP PROTECTED**\n\n"
         "🛡 Anti-spam: ON\n"
         "📊 Engagement: TRACKED\n"
         "🚀 Auto-post to @ICEGODSICEDEVIL: ENABLED\n\n"
-        f"_When you launch a token, I'll detect it and post to the channel. "
-        f"Then you use /campaign to set airdrop amounts._",
+        f"_When you launch a token, I'll detect it. "
+        f"Then use /campaign to set airdrop amounts._",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -809,22 +742,22 @@ async def security_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     cid = str(update.effective_chat.id)
     
-    async with pool.acquire() as conn:
-        group = await conn.fetchrow("SELECT * FROM protected_groups WHERE telegram_chat_id=$1 AND is_active", cid)
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT * FROM protected_groups WHERE telegram_chat_id=? AND is_active=1", (cid,)) as c:
+            group = await c.fetchone()
         if not group:
             return
         
-        # Track engagement
-        await conn.execute("""
+        await db.execute("""
             INSERT INTO user_engagement (group_id, telegram_id, username, message_count)
-            VALUES ((SELECT id FROM protected_groups WHERE telegram_chat_id=$1), $2, $3, 1)
+            VALUES ((SELECT id FROM protected_groups WHERE telegram_chat_id=?), ?, ?, 1)
             ON CONFLICT (group_id, telegram_id) DO UPDATE SET
-                message_count = user_engagement.message_count + 1,
-                username = EXCLUDED.username,
-                last_active = NOW()
-        """, cid, str(update.effective_user.id), update.effective_user.username or '')
+                message_count = message_count + 1,
+                username = excluded.username,
+                last_active = CURRENT_TIMESTAMP
+        """, (cid, str(update.effective_user.id), update.effective_user.username or ''))
+        await db.commit()
     
-    # Spam check
     try:
         m = await context.bot.get_chat_member(cid, update.effective_user.id)
         if m.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
@@ -849,17 +782,14 @@ async def security_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════════════════════
 
 async def main():
-    global pool, bot_instance
+    global bot_instance
     
-    if not await init_database():
-        return
-    
+    await init_db()
     threading.Thread(target=run_flask, daemon=True).start()
     
     app = Application.builder().token(Config.BOT_TOKEN).build()
     bot_instance = app.bot
     
-    # Conversation handlers
     sub_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(plan_selected, pattern="^plan_")],
         states={AWAITING_PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_payment)]},
@@ -874,7 +804,6 @@ async def main():
         per_message=False
     )
     
-    # Handlers
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("campaign", cmd_campaign))
     app.add_handler(CommandHandler("activate", cmd_activate))
