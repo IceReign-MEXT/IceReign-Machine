@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ICE REIGN MACHINE V6 - Stable Edition
+ICE REIGN MACHINE V6 - Python 3.14 Compatible
 """
 
 import os
@@ -548,7 +548,7 @@ async def get_eligible_users(campaign):
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute("""
             SELECT ue.telegram_id, ue.username, ue.message_count,
-                   (ue.message_count * 1 + 0 * 2) as score
+                   (ue.message_count) as score
             FROM user_engagement ue
             JOIN protected_groups pg ON pg.id = ue.group_id
             WHERE pg.dev_id = ?
@@ -690,24 +690,24 @@ async def security_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 # ═══════════════════════════════════════════════════════════
-# MAIN
+# MAIN - ASYNC (Python 3.14 Compatible)
 # ═══════════════════════════════════════════════════════════
 
-def main():
+async def main():
     global bot_instance
     
-    # Initialize database
-    asyncio.run(init_db())
+    # Init database
+    await init_db()
     
     # Start Flask
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
-    # Build application (v20.0 style)
+    # Build application
     application = Application.builder().token(BOT_TOKEN).build()
     bot_instance = application.bot
     
-    # Conversation handlers
+    # Add handlers
     sub_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(plan_selected, pattern="^plan_")],
         states={AWAITING_PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_payment)]},
@@ -722,7 +722,6 @@ def main():
         per_message=False
     )
     
-    # Add handlers
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("campaign", cmd_campaign))
     application.add_handler(CommandHandler("activate", cmd_activate))
@@ -735,8 +734,16 @@ def main():
     logger.info(f"👑 Admin: {ADMIN_ID}")
     logger.info(f"💰 Wallet: {SOL_MAIN[:20]}...")
     
-    # Start polling (blocking)
-    application.run_polling()
+    # Initialize and start (manual async - no run_polling)
+    await application.initialize()
+    await application.start()
+    
+    # Start updater manually
+    await application.updater.start_polling(drop_pending_updates=True)
+    
+    # Keep running
+    stop_event = asyncio.Event()
+    await stop_event.wait()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
