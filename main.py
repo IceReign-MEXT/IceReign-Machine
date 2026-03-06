@@ -1,17 +1,7 @@
 #!/usr/bin/env python3
-"""
-ICE REIGN MACHINE V6.2 - RENDER OPTIMIZED
-Runs both Flask (web) and Telegram bot concurrently
-"""
-import os
-import asyncio
-import logging
-import threading
-import aiosqlite
-import aiohttp
+import os, asyncio, logging, threading, aiosqlite, aiohttp
 from datetime import datetime, timedelta
 from typing import Optional, Dict
-
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.constants import ParseMode, ChatMemberStatus
@@ -19,48 +9,28 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from dotenv import load_dotenv
 
 load_dotenv()
-
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Config
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID")
-SOL_MAIN = os.getenv("SOL_MAIN")
-HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
-PORT = int(os.getenv("PORT", 10000))  # Render default
-SUBSCRIPTION_PRICE = float(os.getenv("SUBSCRIPTION_PRICE", 0.5))
-PRO_PRICE = float(os.getenv("PRO_PRICE", 3.0))
-DB_FILE = "ice_reign.db"
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+ADMIN_ID = os.getenv('ADMIN_ID')
+SOL_MAIN = os.getenv('SOL_MAIN')
+HELIUS_API_KEY = os.getenv('HELIUS_API_KEY')
+PORT = int(os.getenv('PORT', 10000))
+SUBSCRIPTION_PRICE = float(os.getenv('SUBSCRIPTION_PRICE', 0.5))
+PRO_PRICE = float(os.getenv('PRO_PRICE', 3.0))
+DB_FILE = 'ice_reign.db'
 AWAITING_PAYMENT = 1
 
-# Create Flask app
 flask_app = Flask(__name__)
 
-@flask_app.route("/")
+@flask_app.route('/')
 def health():
-    """Health check endpoint - Render pings this"""
-    return jsonify({
-        "status": "ICE REIGN ONLINE",
-        "version": "6.2.0",
-        "wallet": SOL_MAIN,
-        "time": datetime.utcnow().isoformat()
-    }), 200
-
-@flask_app.route("/webhook/helius", methods=["POST"])
-def helius_webhook():
-    """Helius webhook for token detection"""
-    data = request.json
-    logger.info(f"Helius webhook received: {data}")
-    # Process token detection async
-    return jsonify({"received": True, "status": "processing"}), 200
+    return jsonify({'status': 'ICE REIGN ONLINE', 'version': '6.3.0', 'wallet': SOL_MAIN, 'time': datetime.utcnow().isoformat()}), 200
 
 def run_flask():
-    """Run Flask in background thread"""
-    logger.info(f"🌐 Starting Flask on port {PORT}")
-    flask_app.run(host='0.0.0.0', port=PORT, threaded=True, debug=False)
+    flask_app.run(host='0.0.0.0', port=PORT, threaded=True, debug=False, use_reloader=False)
 
-# Database
 async def init_db():
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("CREATE TABLE IF NOT EXISTS dev_subscriptions (id INTEGER PRIMARY KEY, telegram_id TEXT UNIQUE, username TEXT, tier TEXT DEFAULT 'none', status TEXT DEFAULT 'inactive', subscription_end TIMESTAMP)")
@@ -71,8 +41,7 @@ async def init_db():
         await db.commit()
     logger.info("✅ Database initialized")
 
-# Solana
-async def verify_sol_payment(tx_sig: str, expected: float) -> bool:
+async def verify_sol_payment(tx_sig, expected):
     try:
         async with aiohttp.ClientSession() as s:
             url = f"https://api.helius.xyz/v0/transactions/?api-key={HELIUS_API_KEY}"
@@ -88,68 +57,60 @@ async def verify_sol_payment(tx_sig: str, expected: float) -> bool:
         logger.error(f"Verify error: {e}")
         return False
 
-# Helpers
-async def get_dev_sub(telegram_id: int) -> Optional[Dict]:
+async def get_dev_sub(telegram_id):
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM dev_subscriptions WHERE telegram_id = ?", (str(telegram_id),)) as c:
             row = await c.fetchone()
             return dict(row) if row else None
 
-async def get_wallet(telegram_id: int) -> Optional[str]:
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT wallet_address FROM user_wallets WHERE telegram_id = ?", (str(telegram_id),)) as c:
-            row = await c.fetchone()
-            return row[0] if row else None
-
-async def get_revenue() -> float:
+async def get_revenue():
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute("SELECT COALESCE(SUM(amount_sol), 0) FROM platform_payments") as c:
             return (await c.fetchone())[0]
 
-# Handlers
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update, context):
     user, chat_type = update.effective_user, update.effective_chat.type
     if chat_type == "private":
         if str(user.id) == ADMIN_ID:
-            await update.message.reply_text(f"👑 *ADMIN*\\nRevenue: `{await get_revenue():.4f}` SOL\\nWallet: `{SOL_MAIN}`", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(f"👑 *ADMIN*\nRevenue: `{await get_revenue():.4f}` SOL\nWallet: `{SOL_MAIN}`", parse_mode=ParseMode.MARKDOWN)
             return
         dev = await get_dev_sub(user.id)
         if dev and dev['status'] == 'active':
-            await update.message.reply_text(f"👨‍💻 *DASHBOARD*\\nTier: `{dev['tier'].upper()}`\\nExpires: `{dev['subscription_end']}`", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(f"👨‍💻 *DASHBOARD*\nTier: `{dev['tier'].upper()}`\nExpires: `{dev['subscription_end']}`", parse_mode=ParseMode.MARKDOWN)
         else:
             keyboard = [[InlineKeyboardButton(f"💎 Basic - {SUBSCRIPTION_PRICE} SOL", callback_data="sub_basic")],
                         [InlineKeyboardButton(f"👑 Pro - {PRO_PRICE} SOL", callback_data="sub_pro")]]
-            await update.message.reply_text("🚀 *ICE REIGN MACHINE*\\n\\nAuto-detect & distribute tokens", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text("🚀 *ICE REIGN MACHINE*\n\nAuto-detect & distribute tokens", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
     else:
-        await update.message.reply_text("🛡 *Ice Reign Active*\\n/wallet - Register SOL\\n/airdrop - Check eligibility", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("🛡 *Ice Reign Active*\n/wallet - Register SOL\n/airdrop - Check eligibility", parse_mode=ParseMode.MARKDOWN)
 
-async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def wallet_cmd(update, context):
     if len(context.args) != 1: return await update.message.reply_text("💼 Usage: `/wallet ADDRESS`", parse_mode=ParseMode.MARKDOWN)
     wallet = context.args[0].strip()
     if len(wallet) < 32: return await update.message.reply_text("❌ Invalid address")
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("INSERT INTO user_wallets VALUES (?, ?) ON CONFLICT(telegram_id) DO UPDATE SET wallet_address = excluded.wallet_address", (str(update.effective_user.id), wallet))
         await db.commit()
-    await update.message.reply_text(f"✅ Wallet registered:\\n`{wallet}`", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"✅ Wallet registered:\n`{wallet}`", parse_mode=ParseMode.MARKDOWN)
 
-async def airdrop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def airdrop_cmd(update, context):
     chat_id = str(update.effective_chat.id)
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute("SELECT message_count FROM user_engagement WHERE group_chat_id = ? AND telegram_id = ?", (chat_id, str(update.effective_user.id))) as c:
             row = await c.fetchone()
-    await update.message.reply_text(f"📊 *Your Stats*\\nMessages: `{row[0] if row else 0}`\\n\\nKeep engaging!", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"📊 *Your Stats*\nMessages: `{row[0] if row else 0}`\n\nKeep engaging!", parse_mode=ParseMode.MARKDOWN)
 
-async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def sub_callback(update, context):
     query = update.callback_query
     await query.answer()
     tier = query.data.replace("sub_", "")
     amount = SUBSCRIPTION_PRICE if tier == "basic" else PRO_PRICE
     context.user_data['payment'] = {'tier': tier, 'amount': amount}
-    await query.edit_message_text(f"💳 *{tier.upper()}*\\n\\nSend `{amount}` SOL to:\\n`{SOL_MAIN}`\\n\\nReply with TX:", parse_mode=ParseMode.MARKDOWN)
+    await query.edit_message_text(f"💳 *{tier.upper()}*\n\nSend `{amount}` SOL to:\n`{SOL_MAIN}`\n\nReply with TX:", parse_mode=ParseMode.MARKDOWN)
     return AWAITING_PAYMENT
 
-async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def process_payment(update, context):
     tx, user = update.message.text.strip(), update.effective_user
     payment = context.user_data.get('payment')
     if not payment: return await update.message.reply_text("Session expired") or ConversationHandler.END
@@ -161,12 +122,12 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await db.execute("INSERT INTO platform_payments (dev_telegram_id, amount_sol, tx_signature) VALUES (?, ?, ?)", (str(user.id), payment['amount'], tx))
             await db.commit()
         await context.bot.send_message(ADMIN_ID, f"💰 {payment['amount']} SOL from @{user.username}")
-        await update.message.reply_text(f"✅ *ACTIVATED!*\\nTier: `{payment['tier'].upper()}`\\nExpires: `{expiry.strftime('%Y-%m-%d')}`", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"✅ *ACTIVATED!*\nTier: `{payment['tier'].upper()}`\nExpires: `{expiry.strftime('%Y-%m-%d')}`", parse_mode=ParseMode.MARKDOWN)
     else:
         await update.message.reply_text("❌ Payment not found")
     return ConversationHandler.END
 
-async def activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def activate(update, context):
     chat, user = update.effective_chat, update.effective_user
     if chat.type == "private": return await update.message.reply_text("Use in group!")
     member = await context.bot.get_chat_member(chat.id, user.id)
@@ -177,9 +138,9 @@ async def activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db.execute("INSERT INTO protected_groups (dev_telegram_id, telegram_chat_id, group_name, is_active) VALUES (?, ?, ?, 1) ON CONFLICT(telegram_chat_id) DO UPDATE SET is_active = 1", (str(user.id), str(chat.id), chat.title))
         await db.commit()
     await context.bot.set_my_commands([BotCommand("wallet", "Register SOL"), BotCommand("airdrop", "Check eligibility")], scope={"type": "chat", "chat_id": chat.id})
-    await update.message.reply_text("✅ *GROUP PROTECTED*\\n🛡 Anti-spam: ON\\n🚀 Airdrop ready", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text("✅ *GROUP PROTECTED*\n🛡 Anti-spam: ON\n🚀 Airdrop ready", parse_mode=ParseMode.MARKDOWN)
 
-async def track_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def track_msg(update, context):
     msg = update.message
     if not msg or not msg.text: return
     chat_id, user = str(update.effective_chat.id), update.effective_user
@@ -194,39 +155,18 @@ async def track_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try: await msg.delete(); await (await context.bot.send_message(chat_id, "🛡 Spam removed")).delete()
         except: pass
 
-# Main - Render Optimized
 def main():
-    # Initialize DB
     asyncio.run(init_db())
-    
-    # Start Flask in background thread (for Render health checks)
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
-    # Give Flask time to start
-    import time
-    time.sleep(2)
-    
-    logger.info(f"🌐 Flask health check server running on port {PORT}")
-    logger.info("🚀 Starting Telegram bot polling...")
-    
-    # Build and run Telegram bot
-    app = Application.builder().token(BOT_TOKEN).build()
-    
-    conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(sub_callback, pattern="^sub_")],
-        states={AWAITING_PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_payment)]},
-        fallbacks=[]
-    )
-    
+    threading.Thread(target=run_flask, daemon=True).start()
+    logger.info("🚀 Starting Telegram bot...")
+    app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
+    conv = ConversationHandler(entry_points=[CallbackQueryHandler(sub_callback, pattern="^sub_")], states={AWAITING_PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_payment)]}, fallbacks=[])
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("wallet", wallet_cmd))
     app.add_handler(CommandHandler("airdrop", airdrop_cmd))
     app.add_handler(CommandHandler("activate", activate))
     app.add_handler(conv)
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, track_msg))
-    
-    # Run bot (blocking)
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
