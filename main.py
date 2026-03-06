@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ICE REIGN MACHINE V5 - AUTONOMOUS AIRDROP EMPIRE
-Revenue Model: Subscriptions + Distribution Fees + Priority Fees
+Revenue Model: Subscriptions + Distribution Fees
 All payments flow to platform wallet: SOL_MAIN
 """
 
@@ -9,14 +9,15 @@ import os
 import json
 import asyncio
 import logging
-import base58
+import threading
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Optional, Dict, List
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # Web Framework
 from flask import Flask, request, jsonify
-import threading
 
 # Telegram
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -25,10 +26,6 @@ from telegram.ext import (
     Application, CommandHandler, ContextTypes, MessageHandler, 
     filters, CallbackQueryHandler, ConversationHandler
 )
-
-# Database
-import asyncpg
-from asyncpg import Pool
 
 # HTTP Client
 import aiohttp
@@ -49,7 +46,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
 VIP_CHANNEL_ID = os.getenv("VIP_CHANNEL_ID")
-SOL_MAIN = os.getenv("SOL_MAIN")  # Your revenue wallet
+SOL_MAIN = os.getenv("SOL_MAIN")
 ETH_MAIN = os.getenv("ETH_MAIN")
 SOLANA_RPC = os.getenv("SOLANA_RPC")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -59,578 +56,371 @@ SUBSCRIPTION_PRICE = float(os.getenv("SUBSCRIPTION_PRICE", 100))
 # Extract Helius API key from RPC URL
 HELIUS_API_KEY = SOLANA_RPC.split("api-key=")[1] if "api-key=" in SOLANA_RPC else ""
 
-# Global pool
-pool: Optional[Pool] = None
+# Global DB connection
+db_conn = None
 
 # Conversation states
-SELECTING_TIER, AWAITING_PAYMENT, CONFIGURING_AIRDROP = range(3)
+AWAITING_PAYMENT = 1
 
-# --- FLASK WEB SERVER (For Render Health Checks & Webhooks) ---
+# --- FLASK WEB SERVER (For Render) ---
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
 def health():
-    """Render health check endpoint"""
+    """Render health check"""
     return jsonify({
         "status": "ICE REIGN MACHINE ONLINE",
         "version": "5.0",
         "revenue_wallet": SOL_MAIN,
-        "platform": "Render",
         "timestamp": datetime.utcnow().isoformat()
     }), 200
 
 @flask_app.route("/helius/webhook", methods=['POST'])
-async def helius_webhook():
-    """Receive token launch notifications from Helius"""
+def helius_webhook():
+    """Helius webhook for token detection"""
     try:
         data = request.json
-        
-        # Process token launch detection
-        await process_token_launch(data)
-        return jsonify({"status": "processed"}), 200
-        
+        # Process in background
+        asyncio.create_task(process_token_launch(data))
+        return jsonify({"status": "received"}), 200
     except Exception as e:
         logger.error(f"Webhook error: {e}")
         return jsonify({"error": str(e)}), 500
 
-def run_web():
-    """Run Flask in separate thread for Render"""
-    flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
+def run_flask():
+    flask_app.run(host='0.0.0.0', port=PORT, threaded=True)
 
-# --- DATABASE INITIALIZATION ---
-async def init_db():
-    global pool
+# --- DATABASE (psycopg2) ---
+def init_db():
+    global db_conn
     try:
-        pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+        db_conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
         
-        async with pool.acquire() as conn:
-            # Create all tables if not exist
-            await conn.execute("""
+        with db_conn.cursor() as cur:
+            # Create tables
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS dev_subscriptions (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    id SERIAL PRIMARY KEY,
                     telegram_id TEXT UNIQUE NOT NULL,
                     username TEXT,
                     tier TEXT DEFAULT 'none',
                     status TEXT DEFAULT 'inactive',
                     sol_wallet TEXT,
-                    subscription_start TIMESTAMP,
                     subscription_end TIMESTAMP,
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             """)
             
-            await conn.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS platform_payments (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    id SERIAL PRIMARY KEY,
                     dev_telegram_id TEXT NOT NULL,
                     amount_sol DECIMAL(20,9) NOT NULL,
-                    payment_type TEXT,
                     tx_signature TEXT,
-                    status TEXT DEFAULT 'completed',
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             """)
             
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS token_campaigns (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    dev_telegram_id TEXT NOT NULL,
-                    token_mint TEXT,
-                    token_symbol TEXT,
-                    token_name TEXT,
-                    total_supply DECIMAL(20,9),
-                    airdrop_allocation DECIMAL(20,9),
-                    per_user_amount DECIMAL(20,9),
-                    status TEXT DEFAULT 'detected',
-                    launch_detected_at TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            
-            await conn.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS protected_groups (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    id SERIAL PRIMARY KEY,
                     dev_telegram_id TEXT NOT NULL,
                     telegram_chat_id TEXT UNIQUE NOT NULL,
                     group_name TEXT,
-                    group_username TEXT,
-                    member_count INT DEFAULT 0,
                     spam_blocked INT DEFAULT 0,
-                    is_active BOOLEAN DEFAULT TRUE,
-                    added_at TIMESTAMP DEFAULT NOW()
+                    is_active BOOLEAN DEFAULT TRUE
                 )
             """)
             
-            await conn.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS user_engagement (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     group_chat_id TEXT NOT NULL,
                     telegram_id TEXT NOT NULL,
-                    username TEXT,
                     message_count INT DEFAULT 0,
                     last_active TIMESTAMP DEFAULT NOW(),
                     UNIQUE(group_chat_id, telegram_id)
                 )
             """)
             
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS platform_stats (
-                    id SERIAL PRIMARY KEY,
-                    total_devs INT DEFAULT 0,
-                    active_groups INT DEFAULT 0,
-                    spam_blocked_total INT DEFAULT 0,
-                    revenue_sol DECIMAL(20,9) DEFAULT 0,
-                    updated_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            
-            # Insert initial stats row
-            await conn.execute("""
-                INSERT INTO platform_stats (id) VALUES (1) 
-                ON CONFLICT DO NOTHING
-            """)
-            
-        logger.info("✅ Database initialized")
+            db_conn.commit()
+        
+        logger.info("✅ Database ready")
         return True
     except Exception as e:
-        logger.error(f"Database failed: {e}")
+        logger.error(f"Database error: {e}")
         return False
 
-# --- HELIUS API FUNCTIONS ---
-async def verify_sol_payment(tx_signature: str, expected_amount: float, recipient: str = SOL_MAIN) -> bool:
-    """Verify Solana payment via Helius API"""
+def get_db():
+    """Get fresh connection if needed"""
+    global db_conn
+    try:
+        # Test connection
+        with db_conn.cursor() as cur:
+            cur.execute("SELECT 1")
+    except:
+        # Reconnect if failed
+        db_conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    return db_conn
+
+# --- HELIUS FUNCTIONS ---
+async def verify_sol_payment(tx_signature: str, expected_amount: float) -> bool:
+    """Verify payment via Helius"""
     try:
         async with aiohttp.ClientSession() as session:
             url = f"https://api.helius.xyz/v0/transactions/?api-key={HELIUS_API_KEY}"
             async with session.post(url, json={"transactions": [tx_signature]}) as resp:
                 if resp.status != 200:
                     return False
-                    
                 data = await resp.json()
-                if not data or len(data) == 0:
+                if not data:
                     return False
                 
                 tx = data[0]
-                
-                # Check for errors
                 if tx.get('err'):
                     return False
                 
-                # Verify native SOL transfers
                 for transfer in tx.get('nativeTransfers', []):
                     amount_sol = float(transfer['amount']) / 1e9
-                    if (transfer['toUserAccount'] == recipient and 
-                        amount_sol >= expected_amount * 0.95):  # 5% tolerance
+                    if (transfer['toUserAccount'] == SOL_MAIN and 
+                        amount_sol >= expected_amount * 0.95):
                         return True
-                        
-                # Verify SPL token transfers (USDC, etc)
-                for token_tx in tx.get('tokenTransfers', []):
-                    amount = float(token_tx.get('tokenAmount', 0))
-                    if (token_tx.get('toUserAccount') == recipient and 
-                        amount >= expected_amount * 0.95):
-                        return True
-                        
         return False
     except Exception as e:
-        logger.error(f"Payment verification error: {e}")
+        logger.error(f"Verify error: {e}")
         return False
-
-async def get_token_info(token_mint: str) -> dict:
-    """Get token metadata from Helius"""
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getAsset",
-                "params": [token_mint]
-            }
-            async with session.post(url, json=payload) as resp:
-                data = await resp.json()
-                return data.get('result', {})
-    except Exception as e:
-        logger.error(f"Token info error: {e}")
-        return {}
 
 async def process_token_launch(data: dict):
-    """Process new token detection from Helius webhook"""
+    """Auto-detect token launches"""
     try:
-        # Extract token info from webhook data
         token_mint = data.get('tokenAddress') or data.get('mint')
-        deployer = data.get('deployer') or data.get('feePayer')
+        deployer = data.get('deployer')
         
         if not token_mint:
             return
         
-        logger.info(f"🚀 Token detected: {token_mint} by {deployer}")
-        
-        # Check if deployer is subscribed dev
-        async with pool.acquire() as conn:
-            dev = await conn.fetchrow("""
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("""
                 SELECT * FROM dev_subscriptions 
-                WHERE sol_wallet = $1 AND status = 'active'
-            """, deployer)
+                WHERE sol_wallet = %s AND status = 'active'
+            """, (deployer,))
+            dev = cur.fetchone()
             
             if dev:
-                # Auto-create campaign
-                await conn.execute("""
-                    INSERT INTO token_campaigns 
-                    (dev_telegram_id, token_mint, status, launch_detected_at)
-                    VALUES ($1, $2, 'detected', NOW())
-                """, dev['telegram_id'], token_mint)
-                
-                # Notify dev via Telegram
-                # This requires bot instance - handled separately
-                logger.info(f"✅ Campaign auto-created for dev {dev['telegram_id']}")
-            else:
-                # Check if any protected group should be notified
-                pass
-                
+                logger.info(f"🚀 Token detected for dev {dev['telegram_id']}: {token_mint}")
+                # Here you would notify the dev
     except Exception as e:
-        logger.error(f"Token launch processing error: {e}")
+        logger.error(f"Token launch error: {e}")
 
 # --- TELEGRAM HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Main entry point"""
+    """Main entry"""
     user = update.effective_user
-    chat_type = update.effective_chat.type
     
-    if chat_type == "private":
-        # Check if user is admin
+    if update.effective_chat.type == "private":
         if str(user.id) == ADMIN_ID:
             await show_admin_dashboard(update)
             return
-            
-        # Check if user is subscribed dev
-        async with pool.acquire() as conn:
-            dev = await conn.fetchrow(
-                "SELECT * FROM dev_subscriptions WHERE telegram_id = $1", 
-                str(user.id)
-            )
+        
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM dev_subscriptions WHERE telegram_id = %s", (str(user.id),))
+            dev = cur.fetchone()
         
         if dev and dev['status'] == 'active':
             await show_dev_dashboard(update, dev)
         else:
             await show_subscription_menu(update)
     else:
-        # Group chat
         await update.message.reply_text(
-            "🤖 **ICE REIGN MACHINE ACTIVATED**\n\n"
-            "🛡 Anti-spam protection: **ACTIVE**\n"
-            "🎯 Auto-airdrop: **STANDBY**\n\n"
-            "👨‍💻 Devs: PM @IceReignBot to subscribe\n"
-            "👥 Users: Airdrops will be announced here",
+            "🤖 **ICE REIGN ACTIVATED**\n"
+            "🛡 Anti-spam: ON\n"
+            "👨‍💻 Devs: PM me to subscribe",
             parse_mode=ParseMode.MARKDOWN
         )
 
 async def show_admin_dashboard(update: Update):
-    """Show platform owner dashboard"""
-    async with pool.acquire() as conn:
-        stats = await conn.fetchrow("SELECT * FROM platform_stats WHERE id = 1")
-        recent_payments = await conn.fetch("""
-            SELECT * FROM platform_payments 
-            ORDER BY created_at DESC LIMIT 5
-        """)
+    """Admin panel"""
+    conn = get_db()
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM platform_payments ORDER BY created_at DESC LIMIT 5")
+        payments = cur.fetchall()
     
-    payments_text = "\n".join([
-        f"• {p['amount_sol']} SOL - {p['payment_type']}"
-        for p in recent_payments
-    ]) if recent_payments else "No payments yet"
+    total = sum(p['amount_sol'] for p in payments) if payments else 0
     
     await update.message.reply_text(
         f"👑 **ADMIN DASHBOARD**\n\n"
-        f"**Platform Stats:**\n"
-        f"• Total Devs: {stats['total_devs']}\n"
-        f"• Active Groups: {stats['active_groups']}\n"
-        f"• Spam Blocked: {stats['spam_blocked_total']}\n"
-        f"• Total Revenue: {stats['revenue_sol']:.4f} SOL\n\n"
-        f"**Recent Payments:**\n{payments_text}\n\n"
-        f"**Your Wallets:**\n"
-        f"`{SOL_MAIN}`\n(SOL)\n\n"
-        f"`{ETH_MAIN}`\n(ETH/BSC)",
+        f"**Total Revenue:** {total:.4f} SOL\n"
+        f"**Wallet:** `{SOL_MAIN}`\n\n"
+        f"All payments go directly to your wallet above.",
         parse_mode=ParseMode.MARKDOWN
     )
 
 async def show_subscription_menu(update: Update):
-    """Show pricing tiers to potential customers"""
+    """Show pricing"""
     keyboard = [
-        [InlineKeyboardButton(f"💎 Basic - ${SUBSCRIPTION_PRICE} SOL/mo", callback_data="sub_basic")],
-        [InlineKeyboardButton("👑 Pro - 3 SOL/mo", callback_data="sub_pro")],
-        [InlineKeyboardButton("🏢 Enterprise - 10 SOL/mo", callback_data="sub_enterprise")],
-        [InlineKeyboardButton("📖 How It Works", callback_data="how_it_works")]
+        [InlineKeyboardButton(f"💎 Basic - {SUBSCRIPTION_PRICE} SOL", callback_data="sub_basic")],
+        [InlineKeyboardButton("👑 Pro - 3 SOL", callback_data="sub_pro")],
     ]
     
-    await update.message.reply_photo(
-        photo="https://images.unsplash.com/photo-1639762681485-074b7f938ba0?w=800",
-        caption=(
-            "🚀 **ICE REIGN MACHINE**\n"
-            "*The Autonomous Airdrop Empire*\n\n"
-            "**What You Get:**\n"
-            "✅ Auto-detect token launches\n"
-            "✅ Anti-spam protection\n"
-            "✅ Engagement tracking\n"
-            "✅ Automatic distribution\n\n"
-            "**Pricing:**\n"
-            f"• Basic: {SUBSCRIPTION_PRICE} SOL/mo\n"
-            f"• Pro: 3 SOL/mo (Priority support)\n"
-            f"• Enterprise: 10 SOL/mo (White-label)\n\n"
-            "**+ 1% platform fee on distributions**\n\n"
-            f"**Payment Address:**\n`{SOL_MAIN}`\n\n"
-            "Click below to subscribe:"
-        ),
+    await update.message.reply_text(
+        f"🚀 **ICE REIGN MACHINE**\n\n"
+        f"Auto-detect launches + Anti-spam protection\n\n"
+        f"**Pricing:**\n"
+        f"• Basic: {SUBSCRIPTION_PRICE} SOL/mo\n"
+        f"• Pro: 3 SOL/mo\n\n"
+        f"**Payment Address:**\n`{SOL_MAIN}`\n\n"
+        f"Click below to subscribe:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.MARKDOWN
     )
 
 async def subscription_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle subscription selection"""
+    """Handle sub selection"""
     query = update.callback_query
     await query.answer()
     
-    data = query.data
+    tier = query.data.replace("sub_", "")
+    amount = SUBSCRIPTION_PRICE if tier == "basic" else 3.0
     
-    if data == "how_it_works":
-        await query.edit_message_text(
-            "📖 **How Ice Reign Works**\n\n"
-            "1. **Subscribe** - Pay monthly fee to SOL_MAIN\n"
-            "2. **Add to Group** - Bot protects & tracks engagement\n"
-            "3. **Launch Token** - We auto-detect via Helius\n"
-            "4. **Configure** - Set allocation per user\n"
-            "5. **Distribute** - Bot sends tokens automatically\n"
-            "6. **Profit** - Users get airdrops, you grow community\n\n"
-            "**Revenue Flow:**\n"
-            "• Subscriptions → Your wallet (SOL_MAIN)\n"
-            "• 1% of every airdrop → Your wallet\n"
-            "• Priority fees → Your wallet\n\n"
-            "Click /start to subscribe",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    tier_prices = {
-        'sub_basic': SUBSCRIPTION_PRICE,
-        'sub_pro': 3.0,
-        'sub_enterprise': 10.0
-    }
-    
-    amount = tier_prices.get(data, SUBSCRIPTION_PRICE)
-    tier_name = data.replace('sub_', '').upper()
-    
-    context.user_data['pending_payment'] = {
-        'tier': tier_name,
-        'amount': amount
-    }
+    context.user_data['payment'] = {'tier': tier, 'amount': amount}
     
     await query.edit_message_text(
-        f"💳 **Subscribe to {tier_name}**\n\n"
-        f"Amount: **{amount} SOL**\n\n"
-        f"**Payment Steps:**\n"
-        f"1. Send exactly {amount} SOL to:\n"
+        f"💳 **{tier.upper()} Subscription**\n\n"
+        f"Send **{amount} SOL** to:\n"
         f"`{SOL_MAIN}`\n\n"
-        f"2. Reply with transaction signature\n"
-        f"(Example: `5x...`)\n\n"
-        f"3. Bot will verify and activate instantly\n\n"
-        f"⚠️ *Payment is monthly. Cancel anytime.*",
+        f"Reply with transaction signature (TX ID):",
         parse_mode=ParseMode.MARKDOWN
     )
-    
     return AWAITING_PAYMENT
 
 async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Verify payment and activate subscription"""
-    tx_signature = update.message.text.strip()
+    """Verify and activate"""
+    tx = update.message.text.strip()
     user = update.effective_user
-    payment_info = context.user_data.get('pending_payment')
+    payment = context.user_data.get('payment')
     
-    if not payment_info:
-        await update.message.reply_text("❌ No pending payment. Use /start")
+    if not payment:
+        await update.message.reply_text("Use /start first")
         return ConversationHandler.END
     
-    # Verify transaction
     await update.message.reply_text("⏳ Verifying payment...")
     
-    is_valid = await verify_sol_payment(
-        tx_signature, 
-        payment_info['amount'], 
-        SOL_MAIN
-    )
-    
-    if is_valid:
-        # Calculate subscription end date (30 days)
-        sub_end = datetime.now() + timedelta(days=30)
+    if await verify_sol_payment(tx, payment['amount']):
+        expiry = datetime.now() + timedelta(days=30)
         
-        async with pool.acquire() as conn:
-            # Insert or update dev subscription
-            await conn.execute("""
-                INSERT INTO dev_subscriptions 
-                (telegram_id, username, tier, status, subscription_start, subscription_end)
-                VALUES ($1, $2, $3, 'active', NOW(), $4)
+        conn = get_db()
+        with conn.cursor() as cur:
+            # Insert or update
+            cur.execute("""
+                INSERT INTO dev_subscriptions (telegram_id, username, tier, status, subscription_end)
+                VALUES (%s, %s, %s, 'active', %s)
                 ON CONFLICT (telegram_id) DO UPDATE SET
-                    tier = $3,
+                    tier = EXCLUDED.tier,
                     status = 'active',
-                    subscription_start = NOW(),
-                    subscription_end = $4
-            """, str(user.id), user.username, payment_info['tier'], sub_end)
+                    subscription_end = EXCLUDED.subscription_end
+            """, (str(user.id), user.username, payment['tier'], expiry))
             
             # Record payment
-            await conn.execute("""
-                INSERT INTO platform_payments 
-                (dev_telegram_id, amount_sol, payment_type, tx_signature)
-                VALUES ($1, $2, 'subscription', $3)
-            """, str(user.id), payment_info['amount'], tx_signature)
+            cur.execute("""
+                INSERT INTO platform_payments (dev_telegram_id, amount_sol, tx_signature)
+                VALUES (%s, %s, %s)
+            """, (str(user.id), payment['amount'], tx))
             
-            # Update platform stats
-            await conn.execute("""
-                UPDATE platform_stats 
-                SET total_devs = total_devs + 1,
-                    revenue_sol = revenue_sol + $1
-                WHERE id = 1
-            """, payment_info['amount'])
+            conn.commit()
         
         await update.message.reply_text(
-            f"✅ **Payment Verified!**\n\n"
-            f"**Tier:** {payment_info['tier']}\n"
-            f"**Expires:** {sub_end.strftime('%Y-%m-%d')}\n\n"
-            f"**Next Steps:**\n"
-            f"1. Add me to your Telegram group\n"
-            f"2. Make me admin (delete messages permission)\n"
-            f"3. Type `/activate` in the group\n\n"
-            f"When you launch a token, I'll detect it automatically!",
+            f"✅ **ACTIVATED!**\n\n"
+            f"Tier: {payment['tier'].upper()}\n"
+            f"Expires: {expiry.strftime('%Y-%m-%d')}\n\n"
+            f"Add me to your group and type /activate",
             parse_mode=ParseMode.MARKDOWN
         )
         
-        # Notify admin (you)
+        # Notify admin
         await context.bot.send_message(
             ADMIN_ID,
             f"💰 **NEW PAYMENT**\n\n"
-            f"User: @{user.username} ({user.id})\n"
-            f"Tier: {payment_info['tier']}\n"
-            f"Amount: {payment_info['amount']} SOL\n"
-            f"TX: `{tx_signature}`",
+            f"From: @{user.username or user.id}\n"
+            f"Amount: {payment['amount']} SOL\n"
+            f"Tier: {payment['tier']}\n"
+            f"TX: `{tx[:20]}...`",
             parse_mode=ParseMode.MARKDOWN
         )
     else:
         await update.message.reply_text(
-            "❌ **Payment Not Found**\n\n"
-            "Please verify:\n"
+            "❌ **Payment not found**\n\n"
+            "Check:\n"
             "• Correct amount sent\n"
-            "• Transaction confirmed on Solana\n"
-            "• Signature is complete (88 characters)\n\n"
-            "Try again or contact support.",
+            "• Transaction confirmed\n"
+            "• Full signature provided",
             parse_mode=ParseMode.MARKDOWN
         )
     
-    context.user_data.clear()
     return ConversationHandler.END
 
 async def show_dev_dashboard(update: Update, dev: dict):
-    """Show active developer their dashboard"""
-    async with pool.acquire() as conn:
-        campaigns = await conn.fetch("""
-            SELECT * FROM token_campaigns 
-            WHERE dev_telegram_id = $1
-            ORDER BY created_at DESC
-        """, dev['telegram_id'])
-        
-        groups = await conn.fetch("""
-            SELECT * FROM protected_groups 
-            WHERE dev_telegram_id = $1 AND is_active = TRUE
-        """, dev['telegram_id'])
-    
-    campaigns_text = "\n".join([
-        f"• {c['token_symbol'] or 'Unknown'} - {c['status'].upper()}"
-        for c in campaigns[:3]
-    ]) if campaigns else "No campaigns yet"
-    
-    groups_text = "\n".join([
-        f"• {g['group_name']} ({g['member_count']} members)"
-        for g in groups
-    ]) if groups else "No groups activated"
+    """Dev panel"""
+    expiry = dev['subscription_end'].strftime('%Y-%m-%d') if dev['subscription_end'] else 'N/A'
     
     await update.message.reply_text(
         f"👨‍💻 **DEV DASHBOARD**\n\n"
-        f"**Plan:** {dev['tier'].upper()}\n"
-        f"**Status:** {'✅ ACTIVE' if dev['status'] == 'active' else '❌ EXPIRED'}\n"
-        f"**Expires:** {dev['subscription_end'].strftime('%Y-%m-%d') if dev['subscription_end'] else 'N/A'}\n\n"
-        f"**Recent Campaigns:**\n{campaigns_text}\n\n"
-        f"**Protected Groups:**\n{groups_text}\n\n"
+        f"Tier: {dev['tier'].upper()}\n"
+        f"Status: {'✅ Active' if dev['status'] == 'active' else '❌ Expired'}\n"
+        f"Expires: {expiry}\n\n"
         f"**Commands:**\n"
-        f"/activate - Add to new group\n"
-        f"/campaigns - View all campaigns\n"
+        f"/activate - Add bot to group\n"
         f"/stats - View engagement stats",
         parse_mode=ParseMode.MARKDOWN
     )
 
 async def activate_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Activate bot in a group (dev only)"""
+    """Activate in group"""
     chat = update.effective_chat
     user = update.effective_user
     
-    # Verify this is a group
     if chat.type == "private":
-        await update.message.reply_text("❌ Use this command in a group")
+        await update.message.reply_text("Use this in a group chat")
         return
     
-    # Verify user is admin in this group
-    try:
-        member = await context.bot.get_chat_member(chat.id, user.id)
-        if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-            await update.message.reply_text("❌ Only group admins can activate")
-            return
-    except Exception as e:
-        logger.error(f"Admin check failed: {e}")
+    # Check admin
+    member = await context.bot.get_chat_member(chat.id, user.id)
+    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+        await update.message.reply_text("Admin only")
         return
     
-    # Check if dev has active subscription
-    async with pool.acquire() as conn:
-        dev = await conn.fetchrow("""
+    # Check subscription
+    conn = get_db()
+    with conn.cursor() as cur:
+        cur.execute("""
             SELECT * FROM dev_subscriptions 
-            WHERE telegram_id = $1 AND status = 'active'
-        """, str(user.id))
+            WHERE telegram_id = %s AND status = 'active'
+        """, (str(user.id),))
+        dev = cur.fetchone()
         
         if not dev:
-            await update.message.reply_text(
-                "❌ **Subscription Required**\n\n"
-                "You need an active subscription to use this bot.\n"
-                "PM @IceReignBot to subscribe."
-            )
+            await update.message.reply_text("❌ Subscribe first. PM me.")
             return
         
-        # Add/update group
-        await conn.execute("""
-            INSERT INTO protected_groups 
-            (dev_telegram_id, telegram_chat_id, group_name, group_username, added_at)
-            VALUES ($1, $2, $3, $4, NOW())
-            ON CONFLICT (telegram_chat_id) DO UPDATE SET
-                is_active = TRUE,
-                dev_telegram_id = $1
-        """, dev['telegram_id'], str(chat.id), chat.title, chat.username or '')
-        
-        # Update stats
-        await conn.execute("""
-            UPDATE platform_stats 
-            SET active_groups = active_groups + 1
-            WHERE id = 1
-        """)
+        cur.execute("""
+            INSERT INTO protected_groups (dev_telegram_id, telegram_chat_id, group_name)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (telegram_chat_id) DO UPDATE SET is_active = TRUE
+        """, (dev['telegram_id'], str(chat.id), chat.title))
+        conn.commit()
     
     await update.message.reply_text(
-        "✅ **GROUP ACTIVATED**\n\n"
-        "🛡 **Security:** Active (Anti-spam enabled)\n"
-        "📊 **Tracking:** User engagement monitored\n"
-        "🎯 **Airdrop:** Auto-detect when you launch token\n\n"
-        "The bot will now:\n"
-        "• Delete spam automatically\n"
-        "• Track active users\n"
-        "• Detect your token launches\n"
-        "• Distribute airdrops automatically\n\n"
-        "_Ice Reign Machine is now protecting this group_",
+        "✅ **GROUP PROTECTED**\n\n"
+        "🛡 Anti-spam: ACTIVE\n"
+        "📊 Tracking engagement\n"
+        "🚀 Will auto-detect your token launches\n\n"
+        "_Ice Reign is watching..._",
         parse_mode=ParseMode.MARKDOWN
     )
 
-# --- SECURITY & ENGAGEMENT ENGINE ---
-async def group_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle all group messages - security + engagement tracking"""
+# --- SECURITY ENGINE ---
+async def group_security(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Anti-spam + engagement tracking"""
     msg = update.message
     if not msg or not msg.text:
         return
@@ -638,134 +428,92 @@ async def group_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     chat_id = str(update.effective_chat.id)
     user = update.effective_user
     
-    # Skip if not in protected group
-    async with pool.acquire() as conn:
-        group = await conn.fetchrow("""
+    # Check if protected
+    conn = get_db()
+    with conn.cursor() as cur:
+        cur.execute("""
             SELECT * FROM protected_groups 
-            WHERE telegram_chat_id = $1 AND is_active = TRUE
-        """, chat_id)
+            WHERE telegram_chat_id = %s AND is_active = TRUE
+        """, (chat_id,))
+        group = cur.fetchone()
         
         if not group:
             return
+        
+        # Track engagement
+        cur.execute("""
+            INSERT INTO user_engagement (group_chat_id, telegram_id, message_count, last_active)
+            VALUES (%s, %s, 1, NOW())
+            ON CONFLICT (group_chat_id, telegram_id) 
+            DO UPDATE SET message_count = user_engagement.message_count + 1, last_active = NOW()
+        """, (chat_id, str(user.id)))
+        conn.commit()
     
-    # Skip admins for spam check (but track engagement)
-    is_admin = False
+    # Skip admins for spam check
     try:
         member = await context.bot.get_chat_member(chat_id, user.id)
         if member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-            is_admin = True
+            return
     except:
-        pass
+        return
     
-    # Track engagement for all users
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO user_engagement 
-            (group_chat_id, telegram_id, username, message_count, last_active)
-            VALUES ($1, $2, $3, 1, NOW())
-            ON CONFLICT (group_chat_id, telegram_id) DO UPDATE SET
-                message_count = user_engagement.message_count + 1,
-                username = $3,
-                last_active = NOW()
-        """, chat_id, str(user.id), user.username or '')
+    # Spam detection
+    text_lower = msg.text.lower()
+    spam_words = ['dm me', 'http', 't.me/', 'investment', 'forex', 'profit guaranteed', 'double your money']
+    spam_score = sum(1 for word in spam_words if word in text_lower)
     
-    # Spam detection for non-admins
-    if not is_admin:
-        spam_score = 0
-        text_lower = msg.text.lower()
-        
-        # Spam indicators
-        spam_patterns = [
-            ('dm me', 3), ('message me', 3), ('pm me', 3),
-            ('http', 2), ('t.me/', 2), ('t.me/joinchat', 3),
-            ('investment', 4), ('forex', 4), ('binary options', 4),
-            ('guaranteed profit', 5), ('100% return', 5),
-            ('send me', 2), ('double your', 4)
-        ]
-        
-        for pattern, score in spam_patterns:
-            if pattern in text_lower:
-                spam_score += score
-        
-        # Check for excessive caps
-        if len(msg.text) > 10:
-            caps_ratio = sum(1 for c in msg.text if c.isupper()) / len(msg.text)
-            if caps_ratio > 0.8:
-                spam_score += 2
-        
-        # Action if spam detected
-        if spam_score >= 4:
-            try:
-                await msg.delete()
-                
-                warning = await context.bot.send_message(
-                    chat_id,
-                    f"🛡 **SPAM NEUTRALIZED**\n\n"
-                    f"User: @{user.username or user.id}\n"
-                    f"Risk Score: {spam_score}/10\n"
-                    f"Action: Message deleted\n\n"
-                    f"_Protected by Ice Reign Machine_",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                
-                # Update stats
-                await conn.execute("""
-                    UPDATE protected_groups 
-                    SET spam_blocked = spam_blocked + 1
-                    WHERE telegram_chat_id = $1
-                """, chat_id)
-                
-                await conn.execute("""
-                    UPDATE platform_stats 
-                    SET spam_blocked_total = spam_blocked_total + 1
-                    WHERE id = 1
-                """)
-                
-                # Delete warning after 10 seconds
-                await asyncio.sleep(10)
-                await warning.delete()
-                
-            except Exception as e:
-                logger.error(f"Failed to delete spam: {e}")
+    if spam_score >= 2:
+        try:
+            await msg.delete()
+            warning = await context.bot.send_message(
+                chat_id,
+                f"🛡 Spam removed from @{user.username or user.id}\n_Protected by Ice Reign_",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            # Update stats
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE protected_groups SET spam_blocked = spam_blocked + 1
+                    WHERE telegram_chat_id = %s
+                """, (chat_id,))
+                conn.commit()
+            
+            await asyncio.sleep(5)
+            await warning.delete()
+        except:
+            pass
 
-# --- MAIN ENTRY POINT ---
+# --- MAIN ---
 async def main():
-    # Initialize database
-    await init_db()
+    # Init database
+    init_db()
     
-    # Start web server for Render in background thread
-    web_thread = threading.Thread(target=run_web, daemon=True)
-    web_thread.start()
-    logger.info(f"🌐 Web server started on port {PORT}")
+    # Start Flask in background thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info(f"🌐 Web server on port {PORT}")
     
-    # Build Telegram bot
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Start bot
+    app = Application.builder().token(BOT_TOKEN).build()
     
-    # Conversation handler for subscription flow
-    subscription_conv = ConversationHandler(
+    # Conversation handler
+    conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(subscription_callback, pattern="^sub_")],
-        states={
-            AWAITING_PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_payment)]
-        },
-        fallbacks=[CommandHandler("cancel", lambda u, c: u.message.reply_text("Cancelled"))]
+        states={AWAITING_PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_payment)]},
+        fallbacks=[]
     )
     
-    # Command handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(subscription_conv)
-    application.add_handler(CommandHandler("activate", activate_group))
+    # Add handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(conv_handler)
+    app.add_handler(CommandHandler("activate", activate_group))
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, group_security))
     
-    # Group message handler (security + engagement)
-    application.add_handler(MessageHandler(
-        filters.TEXT & filters.ChatType.GROUPS, 
-        group_message_handler
-    ))
-    
-    logger.info("🚀 ICE REIGN MACHINE V5 STARTED")
+    logger.info("🚀 ICE REIGN MACHINE STARTED")
     logger.info(f"💰 Revenue wallet: {SOL_MAIN}")
     
-    # Start polling
-    await application.run_polling()
+    await app.run_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
