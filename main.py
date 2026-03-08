@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ICE REIGN MACHINE V6.9 - PSYCOPG2 VERSION
-Python 3.14 Compatible | psycopg2-binary | Auto-webhook
+ICE REIGN MACHINE v7.0 - PRODUCTION WEAPON
+Solana Airdrop Distribution System | Telegram Bot | PostgreSQL
 """
 import os
 import asyncio
@@ -11,7 +11,7 @@ import urllib.request
 import json
 import psycopg2
 from datetime import datetime, timedelta
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, Bot
 from telegram.constants import ParseMode, ChatMemberStatus
@@ -30,7 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Config
+# ==================== CONFIG ====================
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID = os.getenv('ADMIN_ID')
 SOL_MAIN = os.getenv('SOL_MAIN')
@@ -46,14 +46,37 @@ AWAITING_PAYMENT = 1
 bot = Bot(token=BOT_TOKEN)
 application = None
 
-# Flask
+# ==================== WEBHOOK SETUP ====================
+def setup_webhook():
+    try:
+        webhook_url = f"{RENDER_URL}/webhook/telegram"
+        api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}"
+        
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        
+        response = urllib.request.urlopen(api_url, context=ctx, timeout=30)
+        result = json.loads(response.read().decode())
+        
+        if result.get('ok'):
+            logger.info(f"✅ Webhook set: {webhook_url}")
+            return True
+        else:
+            logger.error(f"❌ Webhook failed: {result}")
+            return False
+    except Exception as e:
+        logger.error(f"⚠️ Webhook error: {e}")
+        return False
+
+# ==================== FLASK ====================
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def health():
     return jsonify({
         'status': 'ICE REIGN ONLINE',
-        'version': '6.9.0',
+        'version': '7.0.0',
         'wallet': SOL_MAIN,
         'time': datetime.now().isoformat()
     }), 200
@@ -80,34 +103,12 @@ async def handle_update(update: Update):
     except Exception as e:
         logger.error(f"Update error: {e}")
 
-def setup_webhook():
-    try:
-        webhook_url = f"{RENDER_URL}/webhook/telegram"
-        api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}"
-        
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        
-        response = urllib.request.urlopen(api_url, context=ctx, timeout=30)
-        result = json.loads(response.read().decode())
-        
-        if result.get('ok'):
-            logger.info(f"✅ Webhook set: {webhook_url}")
-            return True
-        else:
-            logger.error(f"❌ Webhook failed: {result}")
-            return False
-    except Exception as e:
-        logger.error(f"⚠️ Webhook error: {e}")
-        return False
-
-# Database - psycopg2 version
-def get_db_connection():
+# ==================== DATABASE ====================
+def get_db():
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    conn = get_db_connection()
+    conn = get_db()
     cur = conn.cursor()
     
     cur.execute("""
@@ -163,7 +164,7 @@ def init_db():
     logger.info("✅ Database initialized")
 
 def get_dev_sub(telegram_id: int) -> Optional[Dict]:
-    conn = get_db_connection()
+    conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT * FROM dev_subscriptions WHERE telegram_id = %s", (str(telegram_id),))
     row = cur.fetchone()
@@ -171,18 +172,11 @@ def get_dev_sub(telegram_id: int) -> Optional[Dict]:
     conn.close()
     
     if row:
-        return {
-            'id': row[0],
-            'telegram_id': row[1],
-            'username': row[2],
-            'tier': row[3],
-            'status': row[4],
-            'subscription_end': row[5]
-        }
+        return {'id': row[0], 'telegram_id': row[1], 'username': row[2], 'tier': row[3], 'status': row[4], 'subscription_end': row[5]}
     return None
 
 def get_revenue() -> float:
-    conn = get_db_connection()
+    conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT COALESCE(SUM(amount_sol), 0) FROM platform_payments")
     result = cur.fetchone()[0]
@@ -190,7 +184,7 @@ def get_revenue() -> float:
     conn.close()
     return result or 0.0
 
-# Solana
+# ==================== SOLANA ====================
 async def verify_sol_payment(tx_sig: str, expected: float) -> bool:
     try:
         async with aiohttp.ClientSession() as s:
@@ -209,7 +203,7 @@ async def verify_sol_payment(tx_sig: str, expected: float) -> bool:
         logger.error(f"Verify error: {e}")
         return False
 
-# Handlers
+# ==================== HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_type = update.effective_chat.type
@@ -217,30 +211,46 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_type == "private":
         if str(user.id) == ADMIN_ID:
             rev = get_revenue()
-            await update.message.reply_text(f"👑 *ADMIN*\nRevenue: `{rev:.4f}` SOL\nWallet: `{SOL_MAIN}`", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(
+                f"👑 *ADMIN PANEL*\n\nRevenue: `{rev:.4f}` SOL\nWallet: `{SOL_MAIN}`",
+                parse_mode=ParseMode.MARKDOWN
+            )
             return
         
         dev = get_dev_sub(user.id)
         if dev and dev['status'] == 'active':
-            await update.message.reply_text(f"👨‍💻 *DASHBOARD*\nTier: `{dev['tier'].upper()}`\nExpires: `{dev['subscription_end']}`", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(
+                f"👨‍💻 *DASHBOARD*\nTier: `{dev['tier'].upper()}`\nExpires: `{dev['subscription_end']}`",
+                parse_mode=ParseMode.MARKDOWN
+            )
         else:
             keyboard = [
                 [InlineKeyboardButton(f"💎 Basic - {SUBSCRIPTION_PRICE} SOL", callback_data="sub_basic")],
                 [InlineKeyboardButton(f"👑 Pro - {PRO_PRICE} SOL", callback_data="sub_pro")]
             ]
-            await update.message.reply_text("🚀 *ICE REIGN MACHINE*\n\nAuto-detect & distribute tokens", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(
+                "🚀 *ICE REIGN MACHINE*\n\nAuto-detect & distribute tokens",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
     else:
-        await update.message.reply_text("🛡 *Ice Reign Active*\n/wallet - Register SOL\n/airdrop - Check eligibility", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            "🛡 *Ice Reign Active*\n/wallet - Register SOL\n/airdrop - Check eligibility",
+            parse_mode=ParseMode.MARKDOWN
+        )
 
 async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1:
-        return await update.message.reply_text("💼 Usage: `/wallet YOUR_SOL_ADDRESS`", parse_mode=ParseMode.MARKDOWN)
+        return await update.message.reply_text(
+            "💼 Usage: `/wallet YOUR_SOL_ADDRESS`",
+            parse_mode=ParseMode.MARKDOWN
+        )
     
     wallet = context.args[0].strip()
     if len(wallet) < 32 or len(wallet) > 44:
         return await update.message.reply_text("❌ Invalid address")
     
-    conn = get_db_connection()
+    conn = get_db()
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO user_wallets (telegram_id, wallet_address) VALUES (%s, %s)
@@ -250,19 +260,28 @@ async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur.close()
     conn.close()
     
-    await update.message.reply_text(f"✅ Wallet registered:\n`{wallet}`", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        f"✅ Wallet registered:\n`{wallet}`",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 async def airdrop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-    conn = get_db_connection()
+    conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT message_count FROM user_engagement WHERE group_chat_id = %s AND telegram_id = %s", (chat_id, str(update.effective_user.id)))
+    cur.execute(
+        "SELECT message_count FROM user_engagement WHERE group_chat_id = %s AND telegram_id = %s",
+        (chat_id, str(update.effective_user.id))
+    )
     row = cur.fetchone()
     cur.close()
     conn.close()
     
     count = row[0] if row else 0
-    await update.message.reply_text(f"📊 *Your Stats*\nMessages: `{count}`\n\nKeep engaging!", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        f"📊 *Your Stats*\nMessages: `{count}`\n\nKeep engaging!",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -273,7 +292,10 @@ async def sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data['payment'] = {'tier': tier, 'amount': amount}
     
-    await query.edit_message_text(f"💳 *{tier.upper()}*\n\nSend `{amount}` SOL to:\n`{SOL_MAIN}`\n\nReply with TX:", parse_mode=ParseMode.MARKDOWN)
+    await query.edit_message_text(
+        f"💳 *{tier.upper()}*\n\nSend `{amount}` SOL to:\n`{SOL_MAIN}`\n\nReply with TX:",
+        parse_mode=ParseMode.MARKDOWN
+    )
     return AWAITING_PAYMENT
 
 async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -290,7 +312,7 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await verify_sol_payment(tx, payment['amount']):
         expiry = datetime.now() + timedelta(days=30)
         
-        conn = get_db_connection()
+        conn = get_db()
         cur = conn.cursor()
         cur.execute("""
             INSERT INTO dev_subscriptions (telegram_id, username, tier, status, subscription_end)
@@ -308,7 +330,10 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
         
         await context.bot.send_message(ADMIN_ID, f"💰 {payment['amount']} SOL from @{user.username}")
-        await update.message.reply_text(f"✅ *ACTIVATED!*\nTier: `{payment['tier'].upper()}`\nExpires: `{expiry.strftime('%Y-%m-%d')}`", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            f"✅ *ACTIVATED!*\nTier: `{payment['tier'].upper()}`\nExpires: `{expiry.strftime('%Y-%m-%d')}`",
+            parse_mode=ParseMode.MARKDOWN
+        )
     else:
         await update.message.reply_text("❌ Payment not found")
     
@@ -329,12 +354,12 @@ async def activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not dev or dev['status'] != 'active':
         return await update.message.reply_text("❌ Subscription required")
     
-    conn = get_db_connection()
+    conn = get_db()
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO protected_groups (dev_telegram_id, telegram_chat_id, group_name, is_active)
         VALUES (%s, %s, %s, 1)
-        ON CONFLICT (telegram_id) DO UPDATE SET is_active = 1
+        ON CONFLICT (telegram_chat_id) DO UPDATE SET is_active = 1
     """, (str(user.id), str(chat.id), chat.title))
     conn.commit()
     cur.close()
@@ -345,7 +370,10 @@ async def activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         BotCommand("airdrop", "Check eligibility")
     ], scope={"type": "chat", "chat_id": chat.id})
     
-    await update.message.reply_text("✅ *GROUP PROTECTED*\n🛡 Anti-spam: ON\n🚀 Airdrop ready", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        "✅ *GROUP PROTECTED*\n🛡 Anti-spam: ON\n🚀 Airdrop ready",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 async def track_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -361,7 +389,7 @@ async def track_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         return
     
-    conn = get_db_connection()
+    conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM protected_groups WHERE telegram_chat_id = %s AND is_active = 1", (chat_id,))
     if not cur.fetchone():
@@ -410,21 +438,13 @@ def setup_handlers():
     return application
 
 def main():
-    # Setup webhook
-    if not setup_webhook():
-        logger.warning("⚠️ Webhook setup failed - may already be set")
-    
-    # Init database
+    setup_webhook()
     init_db()
-    
-    # Setup bot
     setup_handlers()
     
-    logger.info("🚀 Ice Reign Machine v6.9 started")
+    logger.info("🚀 Ice Reign Machine v7.0 started")
     logger.info(f"🌐 URL: {RENDER_URL}")
-    logger.info(f"🗄️ Database: PostgreSQL (psycopg2)")
     
-    # Start server
     flask_app.run(host='0.0.0.0', port=PORT, threaded=True, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
