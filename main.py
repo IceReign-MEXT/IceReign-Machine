@@ -10,8 +10,6 @@ import logging
 import ssl
 import urllib.request
 import json
-import psycopg2
-import psycopg2.pool
 import threading
 import time
 import requests
@@ -25,6 +23,8 @@ from telegram.ext import (
 )
 import aiohttp
 from dotenv import load_dotenv
+import pg8000
+from pg8000.dbapi import Connection
 
 load_dotenv()
 
@@ -50,23 +50,26 @@ class Config:
     PLATFORM_FEE = float(os.getenv('PLATFORM_FEE', 2.0))
 
 class Database:
-    _pool = None
-    
-    @classmethod
-    def get_pool(cls):
-        if cls._pool is None:
-            cls._pool = psycopg2.pool.ThreadedConnectionPool(
-                minconn=1, maxconn=20, dsn=Config.DATABASE_URL, sslmode='require'
-            )
-        return cls._pool
+    _conn = None
     
     @classmethod
     def get_conn(cls):
-        return cls.get_pool().getconn()
+        if cls._conn is None:
+            import urllib.parse
+            parsed = urllib.parse.urlparse(Config.DATABASE_URL)
+            cls._conn = pg8000.connect(
+                user=parsed.username,
+                password=parsed.password,
+                host=parsed.hostname,
+                port=parsed.port or 5432,
+                database=parsed.path[1:],
+                ssl_context=True
+            )
+        return cls._conn
     
     @classmethod
     def put_conn(cls, conn):
-        cls.get_pool().putconn(conn)
+        pass
 
 class WebhookManager:
     def __init__(self):
@@ -154,7 +157,6 @@ def api_stats():
         revenue = cur.fetchone()[0]
         cur.execute("SELECT COUNT(*) FROM protected_groups WHERE is_active=1")
         groups = cur.fetchone()[0]
-        Database.put_conn(conn)
         return jsonify({
             'active_subscribers': active_users,
             'total_revenue_sol': float(revenue),
@@ -198,7 +200,6 @@ def init_db():
         )
     """)
     conn.commit()
-    Database.put_conn(conn)
     logger.info("Database initialized")
 
 async def verify_payment(tx_sig: str, expected: float) -> bool:
@@ -227,7 +228,6 @@ def get_dev_sub(telegram_id: str):
         cur = conn.cursor()
         cur.execute("SELECT * FROM dev_subscriptions WHERE telegram_id = %s", (telegram_id,))
         row = cur.fetchone()
-        Database.put_conn(conn)
         if row:
             return {
                 'id': row[0], 'telegram_id': row[1], 'username': row[2],
@@ -249,7 +249,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_revenue = cur.fetchone()[0]
         cur.execute("SELECT COUNT(*) FROM dev_subscriptions WHERE status='active'")
         active_subs = cur.fetchone()[0]
-        Database.put_conn(conn)
         await update.message.reply_text(
             f"👑 *ADMIN PANEL*\n\n"
             f"💰 Total Revenue: `{total_revenue:.4f}` SOL\n"
@@ -329,7 +328,6 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             VALUES (%s, %s, %s)
         """, (str(user.id), payment['amount'], tx_sig))
         conn.commit()
-        Database.put_conn(conn)
         await update.message.reply_text(
             f"✅ *ACTIVATED!*\n\n"
             f"Tier: `{payment['tier'].upper()}`\n"
@@ -367,7 +365,6 @@ async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ON CONFLICT (telegram_chat_id) DO UPDATE SET is_active = 1
     """, (str(user.id), str(chat.id), chat.title))
     conn.commit()
-    Database.put_conn(conn)
     await context.bot.set_my_commands([
         BotCommand("wallet", "Register SOL wallet"),
         BotCommand("airdrop", "Check eligibility")
@@ -396,7 +393,6 @@ async def track_engagement(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM protected_groups WHERE telegram_chat_id = %s AND is_active = 1", (chat_id,))
     if not cur.fetchone():
-        Database.put_conn(conn)
         return
     cur.execute("""
         INSERT INTO user_engagement (group_chat_id, telegram_id, username, message_count)
@@ -405,7 +401,6 @@ async def track_engagement(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message_count = user_engagement.message_count + 1
     """, (chat_id, str(user.id), user.username))
     conn.commit()
-    Database.put_conn(conn)
     text_lower = msg.text.lower()
     spam_keywords = ['dm me', 't.me/', 'http', 'investment', 'forex']
     if sum(1 for k in spam_keywords if k in text_lower) >= 2:
@@ -414,11 +409,8 @@ async def track_engagement(update: Update, context: ContextTypes.DEFAULT_TYPE):
             warning = await context.bot.send_message(chat_id, "🛡 Spam removed")
             await asyncio.sleep(5)
             await warning.delete()
-            conn = Database.get_conn()
-            cur = conn.cursor()
             cur.execute("UPDATE protected_groups SET spam_blocked = spam_blocked + 1 WHERE telegram_chat_id = %s", (chat_id,))
             conn.commit()
-            Database.put_conn(conn)
         except:
             pass
 
